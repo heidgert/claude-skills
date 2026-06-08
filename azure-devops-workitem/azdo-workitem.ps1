@@ -19,6 +19,31 @@ $ErrorActionPreference = 'Stop'
 
 # --- functions are added in later tasks ---
 
+function Find-AzdoConfigFile {
+    param([string]$StartDir)
+    $dir = Get-Item -LiteralPath $StartDir
+    while ($null -ne $dir) {
+        $candidate = Join-Path $dir.FullName '.azuredevops.json'
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+        $dir = $dir.Parent
+    }
+    return $null
+}
+
+function Resolve-AzdoConfig {
+    param(
+        [string]$ConfigPath,
+        [string]$StartDir = (Get-Location).Path
+    )
+    if (-not $ConfigPath) {
+        $ConfigPath = Find-AzdoConfigFile -StartDir $StartDir
+    }
+    if (-not $ConfigPath -or -not (Test-Path -LiteralPath $ConfigPath)) {
+        throw "No .azuredevops.json found (searched from '$StartDir' upward). Create one (see .azuredevops.sample.json) or pass -ConfigPath / explicit -Org and -Project."
+    }
+    return Get-Content -LiteralPath $ConfigPath -Raw -Encoding utf8 | ConvertFrom-Json
+}
+
 function Invoke-Main {
     param(
         [string]$Action, [int]$Id, [string]$Type, [string]$Title, [string]$Body,
