@@ -32,8 +32,21 @@ Describe 'azdo-workitem' {
         It 'throws a clear error when no config is found' {
             $orphan = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Force -Path $orphan | Out-Null
+            # Guard: this test assumes no ancestor of the orphan dir has a real config.
+            # Fail loudly (not silently) if the host tree violates that assumption.
+            $anc = Get-Item -LiteralPath $orphan
+            $ancestorHasConfig = $false
+            while ($null -ne $anc) {
+                if (Test-Path -LiteralPath (Join-Path $anc.FullName '.azuredevops.json')) { $ancestorHasConfig = $true; break }
+                $anc = $anc.Parent
+            }
+            $ancestorHasConfig | Should -BeFalse -Because 'an ancestor .azuredevops.json would defeat the not-found test; relocate the orphan dir'
             { Resolve-AzdoConfig -StartDir $orphan } | Should -Throw '*.azuredevops.json*'
             Remove-Item -Recurse -Force -LiteralPath $orphan
+        }
+        It 'finds config in the StartDir itself (not only ancestors)' {
+            $cfg = Resolve-AzdoConfig -StartDir $script:tmp
+            $cfg.project | Should -Be 'Proj'
         }
         It 'uses an explicit ConfigPath when given' {
             $cfg = Resolve-AzdoConfig -ConfigPath (Join-Path $script:tmp '.azuredevops.json')
