@@ -159,6 +159,14 @@ function Invoke-AzdoAndVerify {
     )
     $headers = Get-AzdoAuthHeader -PatEnvVar $PatEnvVar
 
+    # Read a property StrictMode-safely: API responses routinely omit empty/unset fields,
+    # and dot-access of a missing property under Set-StrictMode -Version Latest throws
+    # PropertyNotFoundException. This helper returns $null for absent properties instead.
+    $getField = {
+        param($obj, $name)
+        if ($obj -and $obj.PSObject.Properties[$name]) { $obj.PSObject.Properties[$name].Value } else { $null }
+    }
+
     try {
         $resp = Invoke-RestMethod -Uri $Plan.Url -Method $Plan.Method -Body $Plan.BodyBytes -ContentType $Plan.ContentType -Headers $headers
     }
@@ -168,38 +176,50 @@ function Invoke-AzdoAndVerify {
         throw "Azure DevOps request failed ($($Plan.Method) $($Plan.Url)): $detail"
     }
 
-    $id = $resp.id
-    # Re-fetch to verify the write landed (guards against silent loss).
-    $verifyUrl = "$($Org.TrimEnd('/'))/$([uri]::EscapeDataString($Project))/_apis/wit/workitems/$id`?api-version=7.1"
-    $check = Invoke-RestMethod -Uri $verifyUrl -Method Get -Headers $headers
+    # The write has succeeded by this point. From here, failures are verification-only and
+    # must NOT mask the successful write — guard reads and re-fetch so we still return id/url.
+    $id = & $getField $resp 'id'
+    if (-not $id) {
+        throw "Azure DevOps $($Plan.Method) succeeded but the response contained no work-item id. Inspect manually."
+    }
+    $webUrl = "$($Org.TrimEnd('/'))/$([uri]::EscapeDataString($Project))/_workitems/edit/$id"
 
-    if ($BodyField) {
-        # Match the body op; guard against an empty/absent Patch under Set-StrictMode (accessing
-        # .value on a $null pipeline result would throw PropertyNotFoundException).
+    # Re-fetch to verify the write landed (cheap insurance against silent loss).
+    $check = $null
+    try {
+        $verifyUrl = "$($Org.TrimEnd('/'))/$([uri]::EscapeDataString($Project))/_apis/wit/workitems/$id`?api-version=7.1"
+        $check = Invoke-RestMethod -Uri $verifyUrl -Method Get -Headers $headers
+    }
+    catch {
+        Write-Warning "Work item $id was written, but the verification re-fetch failed ($($_.Exception.Message)). The write itself succeeded; skipping body/field verification."
+    }
+
+    # Pull the fields bag StrictMode-safely; $checkFields is $null when the re-fetch failed.
+    $checkFields = & $getField $check 'fields'
+
+    if ($checkFields -and $BodyField) {
+        # Compare what we sent to what landed. Match the body op; guard against an empty/absent
+        # Patch under StrictMode. Note: Azure DevOps normalizes/re-renders HTML on store (strips
+        # tags, expands entities), so landed length legitimately differs from sent. Only warn on
+        # GROSS loss (< 50%), which catches "field didn't land / was truncated" without crying
+        # wolf over normal normalization.
         $bodyOp = @($Plan.Patch | Where-Object { $_.path -eq "/fields/$BodyField" })
         $sent = if ($bodyOp.Count -gt 0) { $bodyOp[0].value } else { $null }
-        $got  = $check.fields.$BodyField
+        $got  = & $getField $checkFields $BodyField
         if ($sent) {
             $gotLen = ([string]$got).Length
-            if ($gotLen -lt ([math]::Floor($sent.Length * 0.9))) {
+            if ($gotLen -lt ([math]::Floor($sent.Length * 0.5))) {
                 Write-Warning "Body verification: sent $($sent.Length) chars to '$BodyField' but only $gotLen landed. Possible truncation — inspect the work item."
             }
         }
     }
 
-    $webUrl = "$($Org.TrimEnd('/'))/$([uri]::EscapeDataString($Project))/_workitems/edit/$id"
-    # Read fields StrictMode-safely: a re-fetch may omit fields, and accessing a missing
-    # property under Set-StrictMode -Version Latest throws PropertyNotFoundException.
-    $getField = {
-        param($obj, $name)
-        if ($obj -and $obj.PSObject.Properties[$name]) { $obj.PSObject.Properties[$name].Value } else { $null }
-    }
     $result = [pscustomobject]@{
         id    = $id
         url   = $webUrl
-        type  = & $getField $check.fields 'System.WorkItemType'
-        title = & $getField $check.fields 'System.Title'
-        state = & $getField $check.fields 'System.State'
+        type  = & $getField $checkFields 'System.WorkItemType'
+        title = & $getField $checkFields 'System.Title'
+        state = & $getField $checkFields 'System.State'
     }
     Write-Host "Work item $id : $webUrl" -ForegroundColor Green
     return $result

@@ -211,5 +211,71 @@ Describe 'azdo-workitem' {
                 Should -Throw '*TF401320*'
             Remove-Item Env:TEST_FAKE_PAT
         }
+        It 'does not throw when the re-fetch omits the body field (ADO omits empty fields)' {
+            # Regression: StrictMode dot-access on a missing field must not blow up AFTER a good write.
+            $plan = [pscustomobject]@{
+                Method='POST'; Url='https://dev.azure.com/contoso/P/_apis/wit/workitems/%24Bug?api-version=7.1'
+                ContentType='application/json-patch+json; charset=utf-8'
+                Patch=@([pscustomobject]@{ op='add'; path='/fields/System.Description'; value='hello' })
+                Json='[]'; BodyBytes=[byte[]]@(); BodyByteCount=0; BodyField='System.Description'
+            }
+            Mock Invoke-RestMethod -ParameterFilter { $Method -eq 'POST' } -MockWith { [pscustomobject]@{ id = 7 } }
+            # Re-fetch returns a fields bag WITHOUT System.Description (and without Title/State).
+            Mock Invoke-RestMethod -ParameterFilter { $Method -eq 'Get' } -MockWith {
+                [pscustomobject]@{ id = 7; fields = [pscustomobject]@{ 'System.WorkItemType' = 'Bug' } }
+            }
+            $env:TEST_FAKE_PAT = 'x'
+            $r = Invoke-AzdoAndVerify -Plan $plan -PatEnvVar 'TEST_FAKE_PAT' -Org 'https://dev.azure.com/contoso' -Project 'P' -BodyField 'System.Description'
+            $r.id | Should -Be 7
+            $r.type | Should -Be 'Bug'
+            $r.title | Should -BeNullOrEmpty
+            Remove-Item Env:TEST_FAKE_PAT
+        }
+        It 'warns on gross body loss (truncation)' {
+            $long = 'x' * 200
+            $plan = [pscustomobject]@{
+                Method='POST'; Url='https://dev.azure.com/contoso/P/_apis/wit/workitems/%24Bug?api-version=7.1'
+                ContentType='application/json-patch+json; charset=utf-8'
+                Patch=@([pscustomobject]@{ op='add'; path='/fields/System.Description'; value=$long })
+                Json='[]'; BodyBytes=[byte[]]@(); BodyByteCount=0; BodyField='System.Description'
+            }
+            Mock Invoke-RestMethod -ParameterFilter { $Method -eq 'POST' } -MockWith { [pscustomobject]@{ id = 8 } }
+            Mock Invoke-RestMethod -ParameterFilter { $Method -eq 'Get' } -MockWith {
+                [pscustomobject]@{ id = 8; fields = [pscustomobject]@{ 'System.Description' = 'tiny' } }  # 4 chars vs 200
+            }
+            $env:TEST_FAKE_PAT = 'x'; $w = $null
+            $r = Invoke-AzdoAndVerify -Plan $plan -PatEnvVar 'TEST_FAKE_PAT' -Org 'https://dev.azure.com/contoso' -Project 'P' -BodyField 'System.Description' -WarningVariable w 3>$null
+            $r.id | Should -Be 8
+            ($w -join ' ') | Should -Match 'truncation'
+            Remove-Item Env:TEST_FAKE_PAT
+        }
+        It 'still returns id and url when the verification re-fetch fails' {
+            # A transient failure on the verify GET must not fail a successful write.
+            $plan = [pscustomobject]@{
+                Method='POST'; Url='https://dev.azure.com/contoso/P/_apis/wit/workitems/%24Bug?api-version=7.1'
+                ContentType='application/json-patch+json; charset=utf-8'
+                Patch=@(); Json='[]'; BodyBytes=[byte[]]@(); BodyByteCount=0; BodyField='System.Description'
+            }
+            Mock Invoke-RestMethod -ParameterFilter { $Method -eq 'POST' } -MockWith { [pscustomobject]@{ id = 42 } }
+            Mock Invoke-RestMethod -ParameterFilter { $Method -eq 'Get' } -MockWith { throw [System.Exception]::new('503 throttled') }
+            $env:TEST_FAKE_PAT = 'x'; $w = $null
+            $r = Invoke-AzdoAndVerify -Plan $plan -PatEnvVar 'TEST_FAKE_PAT' -Org 'https://dev.azure.com/contoso' -Project 'P' -BodyField 'System.Description' -WarningVariable w 3>$null
+            $r.id | Should -Be 42
+            $r.url | Should -Match '/_workitems/edit/42'
+            ($w -join ' ') | Should -Match 'verification re-fetch failed'
+            Remove-Item Env:TEST_FAKE_PAT
+        }
+        It 'throws if the write response has no id' {
+            $plan = [pscustomobject]@{
+                Method='POST'; Url='https://dev.azure.com/contoso/P/_apis/wit/workitems/%24Bug?api-version=7.1'
+                ContentType='application/json-patch+json; charset=utf-8'
+                Patch=@(); Json='[]'; BodyBytes=[byte[]]@(); BodyByteCount=0; BodyField='System.Description'
+            }
+            Mock Invoke-RestMethod -ParameterFilter { $Method -eq 'POST' } -MockWith { [pscustomobject]@{ somethingElse = 1 } }
+            $env:TEST_FAKE_PAT = 'x'
+            { Invoke-AzdoAndVerify -Plan $plan -PatEnvVar 'TEST_FAKE_PAT' -Org 'https://dev.azure.com/contoso' -Project 'P' -BodyField 'System.Description' } |
+                Should -Throw '*no work-item id*'
+            Remove-Item Env:TEST_FAKE_PAT
+        }
     }
 }
