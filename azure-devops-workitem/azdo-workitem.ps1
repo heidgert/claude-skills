@@ -56,6 +56,40 @@ function Resolve-AzdoBodyField {
     return 'System.Description'
 }
 
+function Build-AzdoPatch {
+    [CmdletBinding()]  # required so -WarningVariable (a common parameter) is honored
+    param(
+        [string]$Title,
+        [string]$Body,
+        [string]$BodyField,
+        [string]$AssignedTo,
+        [hashtable]$Fields = @{}
+    )
+    $ops = [System.Collections.Generic.List[object]]::new()
+    $written = [System.Collections.Generic.HashSet[string]]::new()
+
+    function Add-Op([string]$field, $value) {
+        $ops.Add([pscustomobject]@{ op = 'add'; path = "/fields/$field"; value = $value }) | Out-Null
+        [void]$written.Add($field)
+    }
+
+    if ($Title)      { Add-Op 'System.Title' $Title }
+    if ($Body)       {
+        if (-not $BodyField) { throw "Build-AzdoPatch: -Body given without -BodyField." }
+        Add-Op $BodyField $Body
+    }
+    if ($AssignedTo) { Add-Op 'System.AssignedTo' $AssignedTo }
+
+    foreach ($key in $Fields.Keys) {
+        if ($written.Contains($key)) {
+            Write-Warning "Field '$key' is set by both -Body/-Title/-AssignedTo and -Fields; the explicit value wins and the -Fields entry is ignored."
+            continue
+        }
+        Add-Op $key $Fields[$key]
+    }
+    return $ops.ToArray()
+}
+
 function Invoke-Main {
     param(
         [string]$Action, [int]$Id, [string]$Type, [string]$Title, [string]$Body,

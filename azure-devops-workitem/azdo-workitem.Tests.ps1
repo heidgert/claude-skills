@@ -73,4 +73,29 @@ Describe 'azdo-workitem' {
             Resolve-AzdoBodyField -Config $script:cfg -Type 'Epic' | Should -Be 'System.Description'
         }
     }
+
+    Context 'Build-AzdoPatch' {
+        It 'builds add ops for title, body field, assignee, and extra fields' {
+            $ops = Build-AzdoPatch -Title 'Hello' -Body '<p>Body</p>' -BodyField 'System.Description' `
+                -AssignedTo 'a@b.com' -Fields @{ 'System.State' = 'New' }
+            ($ops | Where-Object { $_.path -eq '/fields/System.Title' }).value | Should -Be 'Hello'
+            ($ops | Where-Object { $_.path -eq '/fields/System.Description' }).value | Should -Be '<p>Body</p>'
+            ($ops | Where-Object { $_.path -eq '/fields/System.AssignedTo' }).value | Should -Be 'a@b.com'
+            ($ops | Where-Object { $_.path -eq '/fields/System.State' }).value | Should -Be 'New'
+            ($ops | ForEach-Object { $_.op } | Select-Object -Unique) | Should -Be 'add'
+        }
+        It 'omits ops for parameters not provided' {
+            $ops = Build-AzdoPatch -Body 'x' -BodyField 'System.Description'
+            ($ops | Where-Object { $_.path -eq '/fields/System.Title' }) | Should -BeNullOrEmpty
+            $ops.Count | Should -Be 1
+        }
+        It 'lets -Body win over a duplicate entry in -Fields and warns' {
+            $w = $null
+            $ops = Build-AzdoPatch -Body 'real' -BodyField 'System.Description' `
+                -Fields @{ 'System.Description' = 'stale' } -WarningVariable w 3>$null
+            ($ops | Where-Object { $_.path -eq '/fields/System.Description' }).value | Should -Be 'real'
+            ($ops | Where-Object { $_.path -eq '/fields/System.Description' }).Count | Should -Be 1
+            $w | Should -Not -BeNullOrEmpty
+        }
+    }
 }
