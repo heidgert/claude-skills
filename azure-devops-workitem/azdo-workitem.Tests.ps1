@@ -127,4 +127,41 @@ Describe 'azdo-workitem' {
             ($plan.BodyBytes[0] -eq 0xEF -and $plan.BodyBytes[1] -eq 0xBB -and $plan.BodyBytes[2] -eq 0xBF) | Should -BeFalse
         }
     }
+
+    Context 'Get-AzdoAuthHeader' {
+        It 'builds a Basic header from the PAT env var' {
+            $env:TEST_FAKE_PAT = 'secret123'
+            $h = Get-AzdoAuthHeader -PatEnvVar 'TEST_FAKE_PAT'
+            $h.Authorization | Should -Match '^Basic '
+            $decoded = [System.Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($h.Authorization.Substring(6)))
+            $decoded | Should -Be ':secret123'
+            Remove-Item Env:TEST_FAKE_PAT
+        }
+        It 'throws when the PAT env var is missing or empty' {
+            { Get-AzdoAuthHeader -PatEnvVar 'DEFINITELY_NOT_SET_PAT_XYZ' } | Should -Throw '*DEFINITELY_NOT_SET_PAT_XYZ*'
+        }
+    }
+
+    Context 'Invoke-Main -DryRun' {
+        BeforeAll {
+            $script:cfgDir = Join-Path ([System.IO.Path]::GetTempPath()) ("azdodry_" + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force -Path $script:cfgDir | Out-Null
+            @{
+                org = 'https://dev.azure.com/contoso'; project = 'Proj'; patEnvVar = 'TEST_FAKE_PAT'
+                defaultType = 'Bug'; bodyFieldByType = @{ Bug = 'Microsoft.VSTS.TCM.ReproSteps' }
+                defaultAssignee = 'a@b.com'
+            } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:cfgDir '.azuredevops.json') -Encoding utf8
+        }
+        AfterAll { Remove-Item -Recurse -Force -LiteralPath $script:cfgDir }
+
+        It 'prints a plan and sends nothing on create' {
+            $env:TEST_FAKE_PAT = 'x'
+            $out = Invoke-Main -Action create -Title 'Tëst' -Body 'Brödtext med åäö' `
+                -ConfigPath (Join-Path $script:cfgDir '.azuredevops.json') -DryRun
+            $out.Method | Should -Be 'POST'
+            $out.BodyField | Should -Be 'Microsoft.VSTS.TCM.ReproSteps'
+            ($out.Patch | Where-Object { $_.path -eq '/fields/Microsoft.VSTS.TCM.ReproSteps' }).value | Should -Be 'Brödtext med åäö'
+            Remove-Item Env:TEST_FAKE_PAT
+        }
+    }
 }
