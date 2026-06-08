@@ -141,8 +141,69 @@ function Get-AzdoAuthHeader {
     return @{ Authorization = "Basic $b64" }
 }
 
-function Get-AzdoWorkItemType { param($Org,$Project,$Id,$PatEnvVar) throw "not implemented yet (Task 7)" }
-function Invoke-AzdoAndVerify { param($Plan,$PatEnvVar,$Org,$Project,$BodyField) throw "not implemented yet (Task 7)" }
+function Get-AzdoWorkItemType {
+    param([string]$Org,[string]$Project,[int]$Id,[string]$PatEnvVar)
+    $headers = Get-AzdoAuthHeader -PatEnvVar $PatEnvVar
+    $url = "$($Org.TrimEnd('/'))/$([uri]::EscapeDataString($Project))/_apis/wit/workitems/$Id`?fields=System.WorkItemType&api-version=7.1"
+    $item = Invoke-RestMethod -Uri $url -Method Get -Headers $headers
+    return $item.fields.'System.WorkItemType'
+}
+
+function Invoke-AzdoAndVerify {
+    param(
+        [Parameter(Mandatory)]$Plan,
+        [Parameter(Mandatory)][string]$PatEnvVar,
+        [Parameter(Mandatory)][string]$Org,
+        [Parameter(Mandatory)][string]$Project,
+        [string]$BodyField
+    )
+    $headers = Get-AzdoAuthHeader -PatEnvVar $PatEnvVar
+
+    try {
+        $resp = Invoke-RestMethod -Uri $Plan.Url -Method $Plan.Method -Body $Plan.BodyBytes -ContentType $Plan.ContentType -Headers $headers
+    }
+    catch {
+        $detail = $_.Exception.Message
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $detail = $_.ErrorDetails.Message }
+        throw "Azure DevOps request failed ($($Plan.Method) $($Plan.Url)): $detail"
+    }
+
+    $id = $resp.id
+    # Re-fetch to verify the write landed (guards against silent loss).
+    $verifyUrl = "$($Org.TrimEnd('/'))/$([uri]::EscapeDataString($Project))/_apis/wit/workitems/$id`?api-version=7.1"
+    $check = Invoke-RestMethod -Uri $verifyUrl -Method Get -Headers $headers
+
+    if ($BodyField) {
+        # Match the body op; guard against an empty/absent Patch under Set-StrictMode (accessing
+        # .value on a $null pipeline result would throw PropertyNotFoundException).
+        $bodyOp = @($Plan.Patch | Where-Object { $_.path -eq "/fields/$BodyField" })
+        $sent = if ($bodyOp.Count -gt 0) { $bodyOp[0].value } else { $null }
+        $got  = $check.fields.$BodyField
+        if ($sent) {
+            $gotLen = ([string]$got).Length
+            if ($gotLen -lt ([math]::Floor($sent.Length * 0.9))) {
+                Write-Warning "Body verification: sent $($sent.Length) chars to '$BodyField' but only $gotLen landed. Possible truncation — inspect the work item."
+            }
+        }
+    }
+
+    $webUrl = "$($Org.TrimEnd('/'))/$([uri]::EscapeDataString($Project))/_workitems/edit/$id"
+    # Read fields StrictMode-safely: a re-fetch may omit fields, and accessing a missing
+    # property under Set-StrictMode -Version Latest throws PropertyNotFoundException.
+    $getField = {
+        param($obj, $name)
+        if ($obj -and $obj.PSObject.Properties[$name]) { $obj.PSObject.Properties[$name].Value } else { $null }
+    }
+    $result = [pscustomobject]@{
+        id    = $id
+        url   = $webUrl
+        type  = & $getField $check.fields 'System.WorkItemType'
+        title = & $getField $check.fields 'System.Title'
+        state = & $getField $check.fields 'System.State'
+    }
+    Write-Host "Work item $id : $webUrl" -ForegroundColor Green
+    return $result
+}
 
 function Invoke-Main {
     param(

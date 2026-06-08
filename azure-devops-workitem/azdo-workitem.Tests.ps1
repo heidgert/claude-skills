@@ -179,4 +179,37 @@ Describe 'azdo-workitem' {
             Remove-Item Env:TEST_FAKE_PAT
         }
     }
+
+    Context 'Invoke-AzdoAndVerify (mocked HTTP)' {
+        It 'sends the plan, re-fetches, and returns id and url; warns on short body' {
+            $plan = [pscustomobject]@{
+                Method='POST'; Url='https://dev.azure.com/contoso/P/_apis/wit/workitems/%24Bug?api-version=7.1'
+                ContentType='application/json-patch+json; charset=utf-8'
+                Patch=@(); Json='[]'; BodyBytes=[byte[]]@(); BodyByteCount=0; BodyField='System.Description'
+            }
+            Mock Invoke-RestMethod -ParameterFilter { $Method -eq 'POST' } -MockWith {
+                [pscustomobject]@{ id = 999; fields = [pscustomobject]@{ 'System.Description' = 'full body here' } }
+            }
+            Mock Invoke-RestMethod -ParameterFilter { $Method -eq 'Get' } -MockWith {
+                [pscustomobject]@{ id = 999; fields = [pscustomobject]@{ 'System.Description' = 'full body here' } }
+            }
+            $env:TEST_FAKE_PAT = 'x'
+            $r = Invoke-AzdoAndVerify -Plan $plan -PatEnvVar 'TEST_FAKE_PAT' -Org 'https://dev.azure.com/contoso' -Project 'P' -BodyField 'System.Description'
+            $r.id | Should -Be 999
+            $r.url | Should -Match '/_workitems/edit/999'
+            Should -Invoke Invoke-RestMethod -Times 2
+            Remove-Item Env:TEST_FAKE_PAT
+        }
+        It 'surfaces a clear error on a non-2xx response' {
+            $plan = [pscustomobject]@{
+                Method='POST'; Url='https://x/y?api-version=7.1'; ContentType='application/json-patch+json'
+                Patch=@(); Json='[]'; BodyBytes=[byte[]]@(); BodyByteCount=0; BodyField='System.Description'
+            }
+            Mock Invoke-RestMethod { throw [System.Exception]::new('Remote 400: TF401320 invalid field') }
+            $env:TEST_FAKE_PAT = 'x'
+            { Invoke-AzdoAndVerify -Plan $plan -PatEnvVar 'TEST_FAKE_PAT' -Org 'https://x' -Project 'y' -BodyField 'System.Description' } |
+                Should -Throw '*TF401320*'
+            Remove-Item Env:TEST_FAKE_PAT
+        }
+    }
 }
