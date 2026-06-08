@@ -110,6 +110,21 @@ Describe 'azdo-workitem' {
             $plan.Url | Should -Be 'https://dev.azure.com/contoso/My%20Proj/_apis/wit/workitems/%24Product%20Backlog%20Item?api-version=7.1'
             $plan.ContentType | Should -Match 'json-patch'
         }
+        It 'serializes a multi-op patch as a flat JSON array (not double-wrapped)' {
+            $multi = @(
+                [pscustomobject]@{ op = 'add'; path = '/fields/System.Title'; value = 'T' }
+                [pscustomobject]@{ op = 'add'; path = '/fields/System.State'; value = 'New' }
+            )
+            $plan = New-AzdoRequestPlan -Action create -Org 'https://dev.azure.com/contoso' `
+                -Project 'P' -Type 'Bug' -Patch $multi
+            # Must be [ {..}, {..} ] — a 2-element array of op objects, not [[..]] (1 element
+            # that is itself an array, which is what the old -InputObject form produced).
+            $plan.Json.TrimStart()[0] | Should -Be '['
+            $parsed = $plan.Json | ConvertFrom-Json
+            $parsed.Count | Should -Be 2          # double-wrapped [[..]] would parse to Count 1
+            $parsed[0].op | Should -Be 'add'      # top-level element is an op object, not an array
+            $parsed[0].path | Should -Be '/fields/System.Title'
+        }
         It 'builds an update URL with the id' {
             $plan = New-AzdoRequestPlan -Action update -Org 'https://dev.azure.com/contoso' `
                 -Project 'My Proj' -Id 4321 -Patch $script:ops

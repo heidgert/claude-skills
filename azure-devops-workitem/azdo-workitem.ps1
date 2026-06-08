@@ -114,7 +114,10 @@ function New-AzdoRequestPlan {
         $method = 'PATCH'
     }
 
-    $json = ConvertTo-Json -InputObject $Patch -Depth 10 -AsArray
+    # Pipe (don't use -InputObject): piping enumerates the ops so a multi-op patch
+    # serializes as [{...},{...}]. -InputObject $array -AsArray would double-wrap to [[...]].
+    # -AsArray keeps the single-op case as [{...}] rather than a bare object.
+    $json = $Patch | ConvertTo-Json -Depth 10 -AsArray
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
 
     return [pscustomobject]@{
