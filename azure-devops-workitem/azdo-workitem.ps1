@@ -90,6 +90,44 @@ function Build-AzdoPatch {
     return $ops.ToArray()
 }
 
+function New-AzdoRequestPlan {
+    param(
+        [Parameter(Mandatory)][ValidateSet('create','update')][string]$Action,
+        [Parameter(Mandatory)][string]$Org,
+        [Parameter(Mandatory)][string]$Project,
+        [string]$Type,
+        [int]$Id,
+        [Parameter(Mandatory)][object[]]$Patch
+    )
+    $orgTrimmed = $Org.TrimEnd('/')
+    $projEnc = [uri]::EscapeDataString($Project)
+    if ($Action -eq 'create') {
+        if (-not $Type) { throw "New-AzdoRequestPlan: -Type is required for create." }
+        # Work-item create path is /_apis/wit/workitems/${Type}; the literal '$' must be encoded as %24.
+        $typeEnc = '%24' + [uri]::EscapeDataString($Type)
+        $url = "$orgTrimmed/$projEnc/_apis/wit/workitems/$typeEnc`?api-version=7.1"
+        $method = 'POST'
+    }
+    else {
+        if (-not $Id) { throw "New-AzdoRequestPlan: -Id is required for update." }
+        $url = "$orgTrimmed/$projEnc/_apis/wit/workitems/$Id`?api-version=7.1"
+        $method = 'PATCH'
+    }
+
+    $json = ConvertTo-Json -InputObject $Patch -Depth 10 -AsArray
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+    return [pscustomobject]@{
+        Method        = $method
+        Url           = $url
+        ContentType   = 'application/json-patch+json; charset=utf-8'
+        Patch         = $Patch
+        Json          = $json
+        BodyBytes     = $bytes
+        BodyByteCount = $bytes.Length
+    }
+}
+
 function Invoke-Main {
     param(
         [string]$Action, [int]$Id, [string]$Type, [string]$Title, [string]$Body,

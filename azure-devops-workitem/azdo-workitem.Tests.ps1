@@ -98,4 +98,30 @@ Describe 'azdo-workitem' {
             $w | Should -Not -BeNullOrEmpty
         }
     }
+
+    Context 'New-AzdoRequestPlan' {
+        BeforeAll {
+            $script:ops = ,([pscustomobject]@{ op = 'add'; path = '/fields/System.Title'; value = 'Tä' })
+        }
+        It 'builds a create URL with the encoded type segment' {
+            $plan = New-AzdoRequestPlan -Action create -Org 'https://dev.azure.com/contoso' `
+                -Project 'My Proj' -Type 'Product Backlog Item' -Patch $script:ops
+            $plan.Method | Should -Be 'POST'
+            $plan.Url | Should -Be 'https://dev.azure.com/contoso/My%20Proj/_apis/wit/workitems/%24Product%20Backlog%20Item?api-version=7.1'
+            $plan.ContentType | Should -Match 'json-patch'
+        }
+        It 'builds an update URL with the id' {
+            $plan = New-AzdoRequestPlan -Action update -Org 'https://dev.azure.com/contoso' `
+                -Project 'My Proj' -Id 4321 -Patch $script:ops
+            $plan.Method | Should -Be 'PATCH'
+            $plan.Url | Should -Be 'https://dev.azure.com/contoso/My%20Proj/_apis/wit/workitems/4321?api-version=7.1'
+        }
+        It 'encodes the body as UTF-8 bytes that round-trip Swedish characters' {
+            $plan = New-AzdoRequestPlan -Action create -Org 'https://dev.azure.com/contoso' `
+                -Project 'P' -Type 'Bug' -Patch (,([pscustomobject]@{ op='add'; path='/fields/X'; value='åäö' }))
+            $decoded = [System.Text.Encoding]::UTF8.GetString($plan.BodyBytes)
+            $decoded | Should -Match 'åäö'
+            $plan.BodyByteCount | Should -Be $plan.BodyBytes.Length
+        }
+    }
 }
