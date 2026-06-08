@@ -122,6 +122,9 @@ Describe 'azdo-workitem' {
             $decoded = [System.Text.Encoding]::UTF8.GetString($plan.BodyBytes)
             $decoded | Should -Match 'åäö'
             $plan.BodyByteCount | Should -Be $plan.BodyBytes.Length
+            # The body must NOT start with a UTF-8 BOM (EF BB BF) — a BOM would corrupt the JSON
+            # that Invoke-RestMethod sends raw. This is the core anti-mojibake guarantee.
+            ($plan.BodyBytes[0] -eq 0xEF -and $plan.BodyBytes[1] -eq 0xBB -and $plan.BodyBytes[2] -eq 0xBF) | Should -BeFalse
         }
     }
 }
