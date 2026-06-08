@@ -178,6 +178,12 @@ Describe 'azdo-workitem' {
             ($out.Patch | Where-Object { $_.path -eq '/fields/Microsoft.VSTS.TCM.ReproSteps' }).value | Should -Be 'Brödtext med åäö'
             Remove-Item Env:TEST_FAKE_PAT
         }
+        It 'throws a clear error on update without an Id' {
+            $env:TEST_FAKE_PAT = 'x'
+            { Invoke-Main -Action update -Body 'x' -ConfigPath (Join-Path $script:cfgDir '.azuredevops.json') -DryRun } |
+                Should -Throw '*-Id is required for update*'
+            Remove-Item Env:TEST_FAKE_PAT
+        }
     }
 
     Context 'Invoke-AzdoAndVerify (mocked HTTP)' {

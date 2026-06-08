@@ -249,6 +249,9 @@ function Invoke-Main {
         if (-not $Type)  { $Type = $cfg.defaultType }
         if (-not $Type)  { throw "-Type not provided and no defaultType in config." }
     }
+    # Fail fast with a clear message rather than a confusing 404 from .../workitems/0 when
+    # an update later needs the id (type lookup, the request URL, the verify re-fetch).
+    if ($Action -eq 'update' -and -not $Id) { throw "-Id is required for update." }
 
     # Body field needs a type. On update without -Type, fetch the item to learn its type.
     $bodyField = $null
@@ -268,12 +271,23 @@ function Invoke-Main {
     $plan | Add-Member -NotePropertyName BodyField -NotePropertyValue $bodyField -PassThru | Out-Null
 
     if ($DryRun) {
-        Write-Host "DRY RUN — no request sent." -ForegroundColor Yellow
-        Write-Host "$($plan.Method) $($plan.Url)"
-        Write-Host "Content-Type: $($plan.ContentType)"
-        Write-Host "Authorization: Basic <redacted>"
-        Write-Host "Body ($($plan.BodyByteCount) bytes):"
-        Write-Host $plan.Json
+        # The whole point of DryRun is to eyeball the body (often Swedish å/ä/ö) before sending.
+        # Force the console to UTF-8 for the preview so it doesn't render as mojibake on a non-UTF8
+        # codepage, then restore the previous encoding. (The bytes on the wire are already correct;
+        # this only affects what the human sees.)
+        $prevEnc = $null
+        try { $prevEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
+        try {
+            Write-Host "DRY RUN — no request sent." -ForegroundColor Yellow
+            Write-Host "$($plan.Method) $($plan.Url)"
+            Write-Host "Content-Type: $($plan.ContentType)"
+            Write-Host "Authorization: Basic <redacted>"
+            Write-Host "Body ($($plan.BodyByteCount) bytes):"
+            Write-Host $plan.Json
+        }
+        finally {
+            if ($null -ne $prevEnc) { try { [Console]::OutputEncoding = $prevEnc } catch { } }
+        }
         return $plan
     }
 
