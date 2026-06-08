@@ -53,4 +53,24 @@ Describe 'azdo-workitem' {
             $cfg.project | Should -Be 'Proj'
         }
     }
+
+    Context 'Resolve-AzdoBodyField' {
+        BeforeAll {
+            $script:cfg = [pscustomobject]@{
+                bodyFieldByType = [pscustomobject]@{
+                    'Bug' = 'Microsoft.VSTS.TCM.ReproSteps'
+                    'Product Backlog Item' = 'System.Description'
+                }
+            }
+        }
+        It 'maps Bug to ReproSteps' {
+            Resolve-AzdoBodyField -Config $script:cfg -Type 'Bug' | Should -Be 'Microsoft.VSTS.TCM.ReproSteps'
+        }
+        It 'maps PBI to System.Description' {
+            Resolve-AzdoBodyField -Config $script:cfg -Type 'Product Backlog Item' | Should -Be 'System.Description'
+        }
+        It 'falls back to System.Description for an unmapped type' {
+            Resolve-AzdoBodyField -Config $script:cfg -Type 'Epic' | Should -Be 'System.Description'
+        }
+    }
 }

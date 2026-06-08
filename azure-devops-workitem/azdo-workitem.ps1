@@ -44,6 +44,18 @@ function Resolve-AzdoConfig {
     return Get-Content -LiteralPath $ConfigPath -Raw -Encoding utf8 | ConvertFrom-Json
 }
 
+function Resolve-AzdoBodyField {
+    param(
+        [Parameter(Mandatory)] $Config,
+        [Parameter(Mandatory)] [string]$Type
+    )
+    $map = $Config.bodyFieldByType
+    if ($null -ne $map -and ($map.PSObject.Properties.Name -contains $Type)) {
+        return $map.$Type
+    }
+    return 'System.Description'
+}
+
 function Invoke-Main {
     param(
         [string]$Action, [int]$Id, [string]$Type, [string]$Title, [string]$Body,
