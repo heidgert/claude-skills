@@ -1,0 +1,13 @@
+{
+  "org": "https://dev.azure.com/preciofishbone",
+  "project": "Kaskelot online",
+  "patEnvVar": "AZURE_DEVOPS_PRECIO_PAT",
+  "defaultType": "Bug",
+  "bodyFieldByType": {
+    "Bug": "Microsoft.VSTS.TCM.ReproSteps",
+    "Product Backlog Item": "System.Description",
+    "Task": "System.Description",
+    "User Story": "System.Description"
+  },
+  "defaultAssignee": "fredrik@troman.se"
+}
