@@ -18,22 +18,26 @@
             {
               "name": "Troman/Valman Webb",
               "label": "Valman Webb",
-              "includeStages": ["Prod"]
+              "includeStages": ["Prod"],
+              "preprodStages": ["Dev", "Staging", "Kundtest"]
             },
             {
               "name": "troman-politiker-back",
               "label": "politiker-back",
-              "includeStages": ["Prod"]
+              "includeStages": ["Prod"],
+              "preprodStages": ["Dev", "Staging", "Kundtest"]
             },
             {
               "name": "troman-politiker-front",
               "label": "politiker-front",
-              "includeStages": ["Prod"]
+              "includeStages": ["Prod"],
+              "preprodStages": ["Dev", "Staging", "Kundtest"]
             },
             {
               "name": "troman-publik",
               "label": "publik",
-              "includeStages": ["Prod"]
+              "includeStages": ["Prod"],
+              "preprodStages": ["Staging"]
             }
           ]
         }
@@ -52,12 +56,14 @@
             {
               "name": "Internal application",
               "label": "Internal",
-              "includeStages": ["Production"]
+              "includeStages": ["Production"],
+              "preprodStages": ["Test", "Stage"]
             },
             {
               "name": "External application",
               "label": "External",
-              "includeStages": ["Production"]
+              "includeStages": ["Production"],
+              "preprodStages": ["Test", "Stage"]
             }
           ]
         }

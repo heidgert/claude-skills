@@ -19,7 +19,21 @@ $ErrorActionPreference = 'Stop'
 function Read-ReleaseConfig {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { throw "Config not found: $Path" }
-    Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json
+    $cfg = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json
+    # Records are keyed by definition name only, so a name in two sources would merge silently.
+    $seen = @{}
+    foreach ($p in @(Get-ConfigList $cfg 'platforms')) {
+        foreach ($s in @(Get-ConfigList $p 'sources')) {
+            foreach ($d in @(Get-ConfigList $s 'definitions')) {
+                $key = ([string]$d.name).Normalize().ToLowerInvariant()
+                if ($seen.ContainsKey($key)) {
+                    throw "Config error: release definition '$($d.name)' is configured in more than one source. Definition names must be unique across sources."
+                }
+                $seen[$key] = $true
+            }
+        }
+    }
+    $cfg
 }
 
 function ConvertTo-UtcDateTime {
@@ -83,7 +97,8 @@ function Get-StageClass {
     param([Parameter(Mandatory)]$Definition, [Parameter(Mandatory)][string]$Stage)
     if ($Definition.PSObject.Properties.Name -contains 'includeStages') {
         if (Test-NameInList -Name $Stage -List @(Get-ConfigList $Definition 'includeStages')) { return 'production' }
-        return 'preprod'
+        if (Test-NameInList -Name $Stage -List @(Get-ConfigList $Definition 'preprodStages')) { return 'preprod' }
+        return 'unclassified'
     }
     if (Test-NameInList -Name $Stage -List @(Get-ConfigList $Definition 'excludeStages')) { return 'excluded' }
     if (Test-NameInList -Name $Stage -List @(Get-ConfigList $Definition 'knownCustomerStages')) { return 'production' }
@@ -126,6 +141,13 @@ function Select-ProductionDeploys {
 
         $class = Get-StageClass -Definition $def -Stage $stage
         if ($class -eq 'preprod') { continue }
+        if ($class -eq 'unclassified') {
+            if ($inMonth -and -not $warned["stage|$defName|$stage"]) {
+                $warned["stage|$defName|$stage"] = $true
+                $warnings.Add("Unknown stage '$stage' in '$defName' ($Platform) is not counted. Classify it in the config: add it to 'includeStages' or 'preprodStages'.")
+            }
+            continue
+        }
         if ($class -eq 'new' -and $inMonth -and -not $warned["stage|$defName|$stage"]) {
             $warned["stage|$defName|$stage"] = $true
             $warnings.Add("New stage '$stage' in '$defName' ($Platform) is counted as a customer tenant. Classify it in the config: add it to 'knownCustomerStages' or 'excludeStages'.")
@@ -325,7 +347,8 @@ function Format-ReleaseReportMarkdown {
         $ten = if ($null -eq $p.TenantDeploys) { '–' } else { "$($p.TenantDeploys)" }
         $null = $sb.AppendLine("| $($p.Name) | $rel | $ten |")
     }
-    $null = $sb.AppendLine("| **Total** | **$($Report.Total)** | |")
+    $totalCell = if ($Report.Complete) { "$($Report.Total)" } else { "$($Report.Total) (INCOMPLETE)" }
+    $null = $sb.AppendLine("| **Total** | **$totalCell** | |")
 
     foreach ($p in $Report.Platforms) {
         if ($p.Groups.Count -eq 0) { continue }
@@ -421,6 +444,9 @@ function Invoke-Main {
                 if ($failed -notcontains $p.name) { $failed.Add($p.name) }
                 continue
             }
+            if ($deps.Count -eq 0) {
+                $warnings.Add("No deployments at all in $($s.org)/$($s.project) between $($min.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)) and $($max.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)) (UTC dates, yyyy-MM-dd); check that its release pipelines have not moved.")
+            }
             $sel = Select-ProductionDeploys -Deployments $deps -Source $s -Platform $p.name `
                 -CountedStatuses @($cfg.countedStatuses) -WindowStart $window.Start -WindowEnd $window.End
             foreach ($r in $sel.Records) { $records.Add($r) }
@@ -440,7 +466,7 @@ function Invoke-Main {
 
     if ((ConvertTo-UtcDateTime $Now) -lt $max) {
         $finalAt = [TimeZoneInfo]::ConvertTimeFromUtc($max, $window.TimeZone).ToString('yyyy-MM-dd HH:mm')
-        $warnings.Insert(0, "Not final yet: releases replaced within $($cfg.supersedeWindowHours) h of month end can still change the count. Run again after $finalAt (Stockholm time).")
+        $warnings.Insert(0, "Not final yet: releases replaced within $($cfg.supersedeWindowHours) h of month end can still change the count. Run again after $finalAt ($($cfg.timeZone) time).")
     }
 
     $report = New-ReleaseReport -Window $window -Config $cfg -Records $okRecords -Groups $groups `

@@ -95,6 +95,31 @@ Describe 'marathon-releases.config.json' {
         $classic.knownCustomerStages | Should -Contain 'Tranås'
         $classic.knownCustomerStages | Should -Contain 'Bjørnafjorden'
     }
+    It 'gives every include-mode definition a preprodStages list that does not overlap includeStages' {
+        foreach ($s in $cfg.platforms.sources) {
+            foreach ($d in $s.definitions) {
+                if ($d.PSObject.Properties.Name -notcontains 'includeStages') { continue }
+                $d.PSObject.Properties.Name | Should -Contain 'preprodStages' -Because $d.name
+                @($d.preprodStages).Count | Should -BeGreaterThan 0 -Because $d.name
+                @($d.preprodStages | Where-Object { @($d.includeStages) -contains $_ }) | Should -BeNullOrEmpty -Because $d.name
+            }
+        }
+    }
+    It 'rejects a definition name configured in more than one source' {
+        $path = Join-Path ([IO.Path]::GetTempPath()) ('marathon_cfg_' + [guid]::NewGuid().ToString('N') + '.json')
+        try {
+            $dup = @{
+                platforms = @(
+                    @{ name = 'A'; sources = @(
+                        @{ org = 'o1'; project = 'p1'; definitions = @(@{ name = 'Shared'; includeStages = @('Prod') }) }
+                        @{ org = 'o2'; project = 'p2'; definitions = @(@{ name = 'shared'; includeStages = @('Prod') }) }
+                    ) }
+                )
+            }
+            $dup | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path -Encoding utf8
+            { Read-ReleaseConfig -Path $path } | Should -Throw '*more than one source*'
+        } finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
+    }
     It 'throws a clear error when the config is missing' {
         { Read-ReleaseConfig -Path 'C:\nope\missing.json' } | Should -Throw '*Config not found*'
     }
@@ -102,12 +127,13 @@ Describe 'marathon-releases.config.json' {
 
 Describe 'Get-StageClass' {
     BeforeAll {
-        $inc = [pscustomobject]@{ name = 'Troman/Valman Webb'; includeStages = @('Prod') }
+        $inc = [pscustomobject]@{ name = 'Troman/Valman Webb'; includeStages = @('Prod'); preprodStages = @('Kundtest') }
         $exc = [pscustomobject]@{ name = 'Mobilise'; excludeStages = @('val', 'UppsalaDev'); knownCustomerStages = @('Tranås', 'Uppsalakommun') }
     }
-    It 'include mode: the listed stage is production, others are pre-prod' {
+    It 'include mode: listed stages are production or pre-prod, anything else is unclassified' {
         Get-StageClass -Definition $inc -Stage 'Prod' | Should -Be 'production'
         Get-StageClass -Definition $inc -Stage 'Kundtest' | Should -Be 'preprod'
+        Get-StageClass -Definition $inc -Stage 'Produktion' | Should -Be 'unclassified'
     }
     It 'exclude mode: excluded, known customer and new stages' {
         Get-StageClass -Definition $exc -Stage 'UppsalaDev' | Should -Be 'excluded'
@@ -200,7 +226,7 @@ Describe 'Select-ProductionDeploys' {
     It 'drops pre-prod stages of include-mode definitions without warnings' {
         $tsrc = [pscustomobject]@{
             org = 'troman-ab'; project = 'Troman'; ignoreDefinitions = @()
-            definitions = @([pscustomobject]@{ name = 'troman-publik'; label = 'publik'; includeStages = @('Prod') })
+            definitions = @([pscustomobject]@{ name = 'troman-publik'; label = 'publik'; includeStages = @('Prod'); preprodStages = @('Staging') })
         }
         $deps = @(
             New-Dep 'troman-publik' 5 'Staging' '2026-09-10T10:00:00Z'
@@ -212,6 +238,21 @@ Describe 'Select-ProductionDeploys' {
         $r.Records[0].Stage | Should -Be 'Prod'
         $r.Excluded.Count | Should -Be 0
         $r.Warnings.Count | Should -Be 0
+    }
+    It 'warns once and does not count a deploy to an unclassified stage of an include-mode definition' {
+        $tsrc = [pscustomobject]@{
+            org = 'troman-ab'; project = 'Troman'; ignoreDefinitions = @()
+            definitions = @([pscustomobject]@{ name = 'troman-publik'; label = 'publik'; includeStages = @('Prod'); preprodStages = @('Staging') })
+        }
+        $deps = @(
+            New-Dep 'troman-publik' 6 'Production' '2026-09-10T10:00:00Z'
+            New-Dep 'troman-publik' 7 'Production' '2026-09-12T10:00:00Z'
+        )
+        $r = Select-ProductionDeploys -Deployments $deps -Source $tsrc -Platform 'Troman' -CountedStatuses @('succeeded') `
+            -WindowStart (Get-Utc '2026-08-31T22:00:00Z') -WindowEnd (Get-Utc '2026-09-30T22:00:00Z')
+        $r.Records.Count | Should -Be 0
+        $r.Warnings.Count | Should -Be 1
+        $r.Warnings[0] | Should -BeLike "*Unknown stage 'Production'*"
     }
     It 'accepts an empty deployment list' {
         $r = Select-ProductionDeploys -Deployments @() @sel
@@ -441,6 +482,7 @@ Describe 'New-ReleaseReport and Format-ReleaseReportMarkdown' {
         $md = Format-ReleaseReportMarkdown -Report (New-ReleaseReport @common -Warnings @('FAILED x') -FailedPlatforms @('Kaskelot')) -TimeZone $tz
         $md | Should -Match 'Total releases \(Marathon KPI\): 2 \(INCOMPLETE'
         $md | Should -Match '\| Kaskelot \| n/a \(failed\) \| – \|'
+        $md | Should -Match '\| \*\*Total\*\* \| \*\*2 \(INCOMPLETE\)\*\* \|'
         $md | Should -Match '- FAILED x'
     }
     It 'leaves a failed platform with data out of the total and the detail' {
@@ -600,6 +642,13 @@ Describe 'Invoke-Main' {
         $md | Should -Match 'Total releases \(Marathon KPI\): 9 \(INCOMPLETE'
         $md | Should -Match '\| Kaskelot \| n/a \(failed\) \| – \|'
         $md | Should -Match 'FAILED to read preciofishbone/Kaskelot online for Kaskelot: .*401'
+    }
+    It 'warns about a source with no deployments at all but does not mark the platform failed' {
+        Mock Get-AzdoDeployments -ParameterFilter { $Org -eq 'troman-ab' } -MockWith { @() }
+        $md = Invoke-Main -Month '2026-09' -Config $ConfigPath -Now $after
+        $md | Should -Match 'No deployments at all in troman-ab/Troman'
+        $md | Should -Match 'Total releases \(Marathon KPI\): 10\*\*'
+        $md | Should -Not -Match 'INCOMPLETE'
     }
     It 'writes the report as JSON when -Json is given' {
         $path = Join-Path ([IO.Path]::GetTempPath()) ('marathon_' + [guid]::NewGuid().ToString('N') + '.json')

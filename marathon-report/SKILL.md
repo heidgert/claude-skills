@@ -23,6 +23,8 @@ pwsh -NoProfile -File ~/.claude/skills/marathon-report/marathon-releases.ps1 -Mo
 | `-Json <path>` | Also write the report data as JSON. |
 | `-Config <path>` | Use another config (default: `marathon-releases.config.json` next to the script). |
 
+Run it in the first days of the month (after the 24 h "not final" window) and keep the `-Json` output as the record, because Azure DevOps release retention can delete old releases and change later re-runs.
+
 Required environment variables (PATs with **Release (Read)** scope):
 
 | Org | Env var | Platform |
@@ -38,7 +40,9 @@ Required environment variables (PATs with **Release (Read)** scope):
    - **INCOMPLETE / FAILED to read …**: the total is not final. Say which org failed and why (often an expired PAT) and do not present the number as the KPI.
    - **Not final yet**: the run is within 24 h of month end. Suggest re-running after the time given.
    - **New stage '…'**: ask the user whether it is a customer tenant or internal, add it to `knownCustomerStages` or `excludeStages` for that definition in the config, commit, and re-run.
-   - **Unknown release definition '…'**: ask the user, then add it to `definitions` (with `includeStages`, or `excludeStages` + `knownCustomerStages`, plus a `label`) or to `ignoreDefinitions`, commit, and re-run.
+   - **Unknown stage '…'**: ask whether it is production or pre-production, then add it to `includeStages` or `preprodStages`, commit and re-run.
+   - **No deployments at all in …**: check whether the pipelines moved and update the config.
+   - **Unknown release definition '…'**: ask the user, then add it to `definitions` (with `includeStages` plus `preprodStages`, or `excludeStages` + `knownCustomerStages`, plus a `label`) or to `ignoreDefinitions`, commit, and re-run.
 3. Only show the detail and "Not counted" sections if the user asks or a number looks surprising.
 
 ## Counting rules (summary)
@@ -47,7 +51,7 @@ The full rules and the reasoning behind them are in
 `D:/Troman/docs/superpowers/specs/2026-10-09-marathon-release-report-design.md`.
 
 1. Only classic Release pipeline deploys with status `succeeded` or `partiallySucceeded` count. Retries count once.
-2. Production = `Prod` (Troman) or `Production` (Kaskelot). For Mobilise every customer-tenant stage is production and internal stages (`val`, `valg`, `UppsalaDev`, `dntdev`, `Demo`, `Demo live`, `Troman`, …) are excluded.
+2. Production = `Prod` (Troman) or `Production` (Kaskelot); these are the `includeStages`, and every other stage of those definitions must be listed in `preprodStages` or the script warns and does not count it. For Mobilise every customer-tenant stage is production and internal stages (`val`, `valg`, `UppsalaDev`, `dntdev`, `Demo`, `Demo live`, `Troman`, …) are excluded.
 3. A release replaced on **every** stage it reached by a newer release of the same definition within **24 h** is folded into the newer one.
 4. A release counts in the month (Stockholm time) of its **first** production deploy, and only once.
 5. Within a platform, releases whose first deploys are within 24 h of the group's first release count as **one** release. This covers Troman components shipped together, Kaskelot Internal + External, and Mobilise Classic + NG.
