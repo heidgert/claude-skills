@@ -1,0 +1,119 @@
+{
+  "timeZone": "Europe/Stockholm",
+  "supersedeWindowHours": 24,
+  "groupWindowHours": 24,
+  "lookbackDays": 90,
+  "countedStatuses": ["succeeded", "partiallySucceeded"],
+  "platforms": [
+    {
+      "name": "Troman",
+      "showTenantDeploys": false,
+      "sources": [
+        {
+          "org": "troman-ab",
+          "project": "Troman",
+          "patEnvVar": "AZURE_DEVOPS_EXT_PAT",
+          "ignoreDefinitions": [],
+          "definitions": [
+            {
+              "name": "Troman/Valman Webb",
+              "label": "Valman Webb",
+              "includeStages": ["Prod"]
+            },
+            {
+              "name": "troman-politiker-back",
+              "label": "politiker-back",
+              "includeStages": ["Prod"]
+            },
+            {
+              "name": "troman-politiker-front",
+              "label": "politiker-front",
+              "includeStages": ["Prod"]
+            },
+            {
+              "name": "troman-publik",
+              "label": "publik",
+              "includeStages": ["Prod"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Kaskelot",
+      "showTenantDeploys": false,
+      "sources": [
+        {
+          "org": "preciofishbone",
+          "project": "Kaskelot online",
+          "patEnvVar": "AZURE_DEVOPS_PRECIO_PAT",
+          "ignoreDefinitions": [],
+          "definitions": [
+            {
+              "name": "Internal application",
+              "label": "Internal",
+              "includeStages": ["Production"]
+            },
+            {
+              "name": "External application",
+              "label": "External",
+              "includeStages": ["Production"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Mobilise",
+      "showTenantDeploys": true,
+      "sources": [
+        {
+          "org": "mobilise",
+          "project": "Mobilise",
+          "patEnvVar": "AZURE_DEVOPS_MOBILISE",
+          "ignoreDefinitions": ["Fredrik testar", "DNT-Phase 2 2023"],
+          "definitions": [
+            {
+              "name": "Mobilise",
+              "label": "Classic",
+              "excludeStages": ["val", "valgdemo", "UppsalaDev", "Demo", "Troman"],
+              "knownCustomerStages": ["Hudoy", "Sport.no", "Sandefjord", "Blåkors", "Cup", "Stockholmpride", "Angelholm", "Welcome", "Kirkens bymisjon", "Fredrikstad", "festival.mobilise.no", "Bjørnafjorden", "Øyainternational", "Vasterås", "ålesund", "Asker", "Bærum", "Harstad", "Kristiansand", "Lillestrøm", "Molde", "Moss", "Nordre follo", "Porsgrunn", "Ringsaker", "Sandnes", "Sarpsborg", "Skien", "Stavanger", "Arbeiderpartiet", "Kongsberg", "Håndball", "Alver", "Tranås", "ljusdal", "Sodertalje", "Oksnøen", "Uppsala", "halmstadforsamling", "handball_dk", "litthusfred", "kilfond", "Oygarden", "Habo", "Upplandsbro", "vbem2026", "mölndal", "Knivsta", "Motala", "marks kommun", "Orsa", "Alvdalen", "Mora", "Ydre", "Hallsberg", "Mullsjo", "Uppsalakommun", "Pitea", "Strangnas", "Ulricehamn", "Ringerike"]
+            },
+            {
+              "name": "DNT-Mobilise",
+              "label": "DNT",
+              "excludeStages": ["testDNT"],
+              "knownCustomerStages": ["Live", "Release.DNT"]
+            },
+            {
+              "name": "Mobilise-Winorg",
+              "label": "Winorg",
+              "excludeStages": [],
+              "knownCustomerStages": ["Frelsesarmeen"]
+            }
+          ]
+        },
+        {
+          "org": "mobilise",
+          "project": "NG-Mobilise",
+          "patEnvVar": "AZURE_DEVOPS_MOBILISE",
+          "ignoreDefinitions": [],
+          "definitions": [
+            {
+              "name": "core web-Api Release",
+              "label": "NG",
+              "excludeStages": ["dev", "val", "valg", "dntdev", "UppsalaDev", "Demo live", "Troman"],
+              "knownCustomerStages": ["hudoy live", "oksnoen", "uppsala", "KIRKENSBYMISJON", "BLAKORS", "halmstadsforsamling", "alver", "Skien", "kongsberg", "stavanger", "kristiansand", "asker", "bjornafjorden", "sarpsborg", "lillestrom", "alesund", "fredrikstad", "nordrefollo", "harstad", "baerum", "DNT", "handball_dk", "porsgrunn", "molde", "sandnes", "festival", "litthusfred", "kilfond", "stockholmpride", "moss", "Oygarden", "habo", "upplandsbro", "Vbem 2026", "Mölndal", "Knivsta", "Motala", "Marks", "Ljusdal", "Mentalhelse", "Orsa", "Alvdalen", "Mora", "Ydre", "Angelholm", "Vasteras", "Hallsberg", "Mullsjo", "Uppsala kommun", "Pitea", "Strangnas", "Tranas", "Sodertalje", "Ulricehamn", "Ringerike"]
+            },
+            {
+              "name": "NG-Mobilise-API/UI-CD",
+              "label": "NG API/UI",
+              "excludeStages": ["dntdev", "Demo", "ngdev or dev", "ng"],
+              "knownCustomerStages": ["nlm"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
