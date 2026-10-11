@@ -99,3 +99,123 @@ Describe 'marathon-releases.config.json' {
         { Read-ReleaseConfig -Path 'C:\nope\missing.json' } | Should -Throw '*Config not found*'
     }
 }
+
+Describe 'Get-StageClass' {
+    BeforeAll {
+        $inc = [pscustomobject]@{ name = 'Troman/Valman Webb'; includeStages = @('Prod') }
+        $exc = [pscustomobject]@{ name = 'Mobilise'; excludeStages = @('val', 'UppsalaDev'); knownCustomerStages = @('Tranås', 'Uppsalakommun') }
+    }
+    It 'include mode: the listed stage is production, others are pre-prod' {
+        Get-StageClass -Definition $inc -Stage 'Prod' | Should -Be 'production'
+        Get-StageClass -Definition $inc -Stage 'Kundtest' | Should -Be 'preprod'
+    }
+    It 'exclude mode: excluded, known customer and new stages' {
+        Get-StageClass -Definition $exc -Stage 'UppsalaDev' | Should -Be 'excluded'
+        Get-StageClass -Definition $exc -Stage 'Uppsalakommun' | Should -Be 'production'
+        Get-StageClass -Definition $exc -Stage 'Nyköping' | Should -Be 'new'
+    }
+    It 'matches regardless of case and Unicode normalization (decomposed å)' {
+        $nfd = 'Tran' + 'a' + [char]0x030A + 's'
+        Get-StageClass -Definition $exc -Stage $nfd | Should -Be 'production'
+        Get-StageClass -Definition $exc -Stage 'uppsaladev' | Should -Be 'excluded'
+    }
+}
+
+Describe 'Select-ProductionDeploys' {
+    BeforeAll {
+        $src = [pscustomobject]@{
+            org = 'mobilise'; project = 'Mobilise'; patEnvVar = 'X'
+            ignoreDefinitions = @('Fredrik testar')
+            definitions = @(
+                [pscustomobject]@{ name = 'Mobilise'; label = 'Classic'; excludeStages = @('val', 'UppsalaDev'); knownCustomerStages = @('Uppsalakommun', 'Ringerike', 'Cup') }
+            )
+        }
+        $sel = @{
+            Source = $src; Platform = 'Mobilise'
+            CountedStatuses = @('succeeded', 'partiallySucceeded')
+            WindowStart = (Get-Utc '2026-08-31T22:00:00Z'); WindowEnd = (Get-Utc '2026-09-30T22:00:00Z')
+        }
+    }
+    It 'keeps customer-stage deploys as records with platform, label and UTC time' {
+        $r = Select-ProductionDeploys -Deployments @(New-Dep 'Mobilise' 490 'Uppsalakommun' '2026-09-03T10:34:10Z') @sel
+        $r.Records.Count | Should -Be 1
+        $r.Records[0].Platform | Should -Be 'Mobilise'
+        $r.Records[0].Label | Should -Be 'Classic'
+        $r.Records[0].ReleaseId | Should -Be 490
+        $r.Records[0].Time | Should -Be (Get-Utc '2026-09-03T10:34:10Z')
+    }
+    It 'puts excluded-stage deploys in Excluded, not Records' {
+        $r = Select-ProductionDeploys -Deployments @(New-Dep 'Mobilise' 492 'UppsalaDev' '2026-09-08T10:00:00Z') @sel
+        $r.Records.Count | Should -Be 0
+        $r.Excluded.Count | Should -Be 1
+        $r.Excluded[0].Stage | Should -Be 'UppsalaDev'
+    }
+    It 'collapses a failed attempt, a successful retry and a redeploy into one record (earliest success)' {
+        $deps = @(
+            New-Dep 'Mobilise' 496 'Ringerike' '2026-09-21T09:00:00Z' -Status 'failed'
+            New-Dep 'Mobilise' 496 'Ringerike' '2026-09-21T09:30:00Z'
+            New-Dep 'Mobilise' 496 'Ringerike' '2026-09-22T09:30:00Z'
+        )
+        $r = Select-ProductionDeploys -Deployments $deps @sel
+        $r.Records.Count | Should -Be 1
+        $r.Records[0].Time | Should -Be (Get-Utc '2026-09-21T09:30:00Z')
+    }
+    It 'counts partiallySucceeded and skips failed, canceled, in-progress and unfinished deploys' {
+        $deps = @(
+            New-Dep 'Mobilise' 495 'Cup' '2026-09-15T10:00:00Z' -Status 'partiallySucceeded'
+            New-Dep 'Mobilise' 496 'Cup' '2026-09-16T10:00:00Z' -Status 'failed'
+            New-Dep 'Mobilise' 497 'Cup' '2026-09-17T10:00:00Z' -Status 'canceled'
+            New-Dep 'Mobilise' 498 'Cup' $null -Status 'inProgress'
+            New-Dep 'Mobilise' 499 'Cup' $null
+        )
+        $r = Select-ProductionDeploys -Deployments $deps @sel
+        $r.Records.Count | Should -Be 1
+        $r.Records[0].ReleaseId | Should -Be 495
+        $r.Records[0].Status | Should -Be 'partiallySucceeded'
+    }
+    It 'warns once about a new stage and still counts it' {
+        $deps = @(
+            New-Dep 'Mobilise' 498 'Nyköping' '2026-09-22T10:00:00Z'
+            New-Dep 'Mobilise' 499 'Nyköping' '2026-09-23T10:00:00Z'
+        )
+        $r = Select-ProductionDeploys -Deployments $deps @sel
+        $r.Records.Count | Should -Be 2
+        $r.Warnings.Count | Should -Be 1
+        $r.Warnings[0] | Should -BeLike "*New stage 'Nyköping'*"
+    }
+    It 'does not warn about a new stage seen only outside the month' {
+        $r = Select-ProductionDeploys -Deployments @(New-Dep 'Mobilise' 480 'Nyköping' '2026-08-10T10:00:00Z') @sel
+        $r.Warnings.Count | Should -Be 0
+    }
+    It 'warns about unknown definitions and silently skips ignored ones' {
+        $deps = @(
+            New-Dep 'Mobilise-Beta' 1 'Cup' '2026-09-10T10:00:00Z'
+            New-Dep 'Fredrik testar' 7 'val' '2026-09-10T10:00:00Z'
+        )
+        $r = Select-ProductionDeploys -Deployments $deps @sel
+        $r.Records.Count | Should -Be 0
+        $r.Warnings.Count | Should -Be 1
+        $r.Warnings[0] | Should -BeLike "*Unknown release definition 'Mobilise-Beta'*"
+    }
+    It 'drops pre-prod stages of include-mode definitions without warnings' {
+        $tsrc = [pscustomobject]@{
+            org = 'troman-ab'; project = 'Troman'; ignoreDefinitions = @()
+            definitions = @([pscustomobject]@{ name = 'troman-publik'; label = 'publik'; includeStages = @('Prod') })
+        }
+        $deps = @(
+            New-Dep 'troman-publik' 5 'Staging' '2026-09-10T10:00:00Z'
+            New-Dep 'troman-publik' 5 'Prod' '2026-09-11T10:00:00Z'
+        )
+        $r = Select-ProductionDeploys -Deployments $deps -Source $tsrc -Platform 'Troman' -CountedStatuses @('succeeded') `
+            -WindowStart (Get-Utc '2026-08-31T22:00:00Z') -WindowEnd (Get-Utc '2026-09-30T22:00:00Z')
+        $r.Records.Count | Should -Be 1
+        $r.Records[0].Stage | Should -Be 'Prod'
+        $r.Excluded.Count | Should -Be 0
+        $r.Warnings.Count | Should -Be 0
+    }
+    It 'accepts an empty deployment list' {
+        $r = Select-ProductionDeploys -Deployments @() @sel
+        $r.Records.Count | Should -Be 0
+        $r.Warnings.Count | Should -Be 0
+    }
+}

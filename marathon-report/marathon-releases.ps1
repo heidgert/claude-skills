@@ -59,3 +59,93 @@ function Get-MonthWindow {
         TimeZone = $tz
     }
 }
+
+function Get-ConfigList {
+    # Returns a config list property, or nothing when it is missing (StrictMode-safe).
+    param($Object, [string]$Name)
+    if ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name -and $null -ne $Object.$Name) {
+        return @($Object.$Name)
+    }
+    return @()
+}
+
+function Test-NameInList {
+    # Case-insensitive match that also ignores Unicode normalization (å as one or two code points).
+    param([string]$Name, [object[]]$List = @())
+    $n = $Name.Normalize()
+    foreach ($x in $List) {
+        if ([string]::Equals(([string]$x).Normalize(), $n, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Get-StageClass {
+    param([Parameter(Mandatory)]$Definition, [Parameter(Mandatory)][string]$Stage)
+    if ($Definition.PSObject.Properties.Name -contains 'includeStages') {
+        if (Test-NameInList -Name $Stage -List @(Get-ConfigList $Definition 'includeStages')) { return 'production' }
+        return 'preprod'
+    }
+    if (Test-NameInList -Name $Stage -List @(Get-ConfigList $Definition 'excludeStages')) { return 'excluded' }
+    if (Test-NameInList -Name $Stage -List @(Get-ConfigList $Definition 'knownCustomerStages')) { return 'production' }
+    return 'new'
+}
+
+function Select-ProductionDeploys {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Deployments,
+        [Parameter(Mandatory)]$Source,
+        [Parameter(Mandatory)][string]$Platform,
+        [Parameter(Mandatory)][string[]]$CountedStatuses,
+        [Parameter(Mandatory)][datetime]$WindowStart,
+        [Parameter(Mandatory)][datetime]$WindowEnd
+    )
+    $defsByName = @{}
+    foreach ($def in @(Get-ConfigList $Source 'definitions')) { $defsByName[$def.name] = $def }
+    $ignore = @(Get-ConfigList $Source 'ignoreDefinitions')
+    $records = @{}
+    $excluded = @{}
+    $warned = @{}
+    $warnings = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($d in $Deployments) {
+        if ($CountedStatuses -notcontains $d.deploymentStatus) { continue }
+        $time = ConvertTo-UtcDateTime $d.completedOn
+        if ($null -eq $time) { continue }
+        $defName = [string]$d.releaseDefinition.name
+        $stage = [string]$d.releaseEnvironment.name
+        $inMonth = $time -ge $WindowStart -and $time -lt $WindowEnd
+
+        $def = $defsByName[$defName]
+        if ($null -eq $def) {
+            if (-not (Test-NameInList -Name $defName -List $ignore) -and $inMonth -and -not $warned["def|$defName"]) {
+                $warned["def|$defName"] = $true
+                $warnings.Add("Unknown release definition '$defName' in $($Source.org)/$($Source.project) had successful deploys this month; not counted. Add it to 'definitions' or 'ignoreDefinitions' in the config.")
+            }
+            continue
+        }
+
+        $class = Get-StageClass -Definition $def -Stage $stage
+        if ($class -eq 'preprod') { continue }
+        if ($class -eq 'new' -and $inMonth -and -not $warned["stage|$defName|$stage"]) {
+            $warned["stage|$defName|$stage"] = $true
+            $warnings.Add("New stage '$stage' in '$defName' ($Platform) is counted as a customer tenant. Classify it in the config: add it to 'knownCustomerStages' or 'excludeStages'.")
+        }
+
+        $label = $defName
+        if ($def.PSObject.Properties.Name -contains 'label' -and $def.label) { $label = $def.label }
+        $rec = [pscustomobject]@{
+            Platform = $Platform; Definition = $defName; Label = $label
+            ReleaseId = [int]$d.release.id; ReleaseName = [string]$d.release.name
+            Stage = $stage; Time = $time; Status = [string]$d.deploymentStatus
+        }
+        $target = if ($class -eq 'excluded') { $excluded } else { $records }
+        $key = "$defName|$($rec.ReleaseId)|$stage"
+        if (-not $target.ContainsKey($key) -or $time -lt $target[$key].Time) { $target[$key] = $rec }
+    }
+
+    [pscustomobject]@{
+        Records  = @($records.Values)
+        Excluded = @($excluded.Values)
+        Warnings = @($warnings)
+    }
+}
