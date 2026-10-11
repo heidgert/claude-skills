@@ -386,3 +386,61 @@ Describe 'Group-PlatformReleases' {
         @(Group-PlatformReleases -Releases @() -WindowHours 24).Count | Should -Be 0
     }
 }
+
+Describe 'New-ReleaseReport and Format-ReleaseReportMarkdown' {
+    BeforeAll {
+        $tz = [TimeZoneInfo]::FindSystemTimeZoneById('Europe/Stockholm')
+        $window = Get-MonthWindow -Month '2026-09' -TimeZone 'Europe/Stockholm'
+        $config = [pscustomobject]@{ platforms = @(
+            [pscustomobject]@{ name = 'Troman'; showTenantDeploys = $false }
+            [pscustomobject]@{ name = 'Kaskelot'; showTenantDeploys = $false }
+            [pscustomobject]@{ name = 'Mobilise'; showTenantDeploys = $true }
+        ) }
+        $records = @(
+            New-Rec 'Troman/Valman Webb' 328 'Prod' '2026-09-30T17:11:42Z' -Platform 'Troman' -Label 'Valman Webb' -Status 'partiallySucceeded' -RelName 'Release-22'
+            New-Rec 'Mobilise' 491 'Uppsalakommun' '2026-09-04T19:45:09Z' -Label 'Classic'
+            New-Rec 'Mobilise' 491 'Motala' '2026-09-04T20:00:00Z' -Label 'Classic'
+            New-Rec 'Mobilise' 488 'Habo' '2026-09-02T10:00:00Z' -Label 'Classic'   # older release, still a tenant deploy this month
+            New-Rec 'Mobilise' 499 'Cup' '2026-10-01T05:00:00Z' -Label 'Classic'    # look-ahead, not this month
+        )
+        $relTroman = [pscustomobject]@{ Platform = 'Troman'; Definition = 'Troman/Valman Webb'; Label = 'Valman Webb'; ReleaseId = 328; ReleaseName = 'Release-22'; FirstDeploy = (Get-Utc '2026-09-30T17:11:42Z'); Stages = @('Prod'); Partial = $true }
+        $relMob = [pscustomobject]@{ Platform = 'Mobilise'; Definition = 'Mobilise'; Label = 'Classic'; ReleaseId = 491; ReleaseName = 'Release-491'; FirstDeploy = (Get-Utc '2026-09-04T19:45:09Z'); Stages = @('Uppsalakommun', 'Motala'); Partial = $false }
+        $groups = @(Group-PlatformReleases -Releases @($relTroman, $relMob) -WindowHours 24)
+        $notCounted = @([pscustomobject]@{ Platform = 'Mobilise'; Label = 'Classic'; ReleaseName = 'Release-492'; Reason = 'no customer production deploys (only: UppsalaDev)' })
+        $common = @{ Window = $window; Config = $config; Records = $records; Groups = $groups; NotCounted = $notCounted }
+    }
+    It 'reports the total across platforms and tenant deploys only where configured' {
+        $r = New-ReleaseReport @common -Warnings @() -FailedPlatforms @()
+        $r.Total | Should -Be 2
+        $r.Complete | Should -BeTrue
+        ($r.Platforms.Name -join ',') | Should -Be 'Troman,Kaskelot,Mobilise'
+        ($r.Platforms | Where-Object Name -eq 'Mobilise').TenantDeploys | Should -Be 3
+        ($r.Platforms | Where-Object Name -eq 'Troman').TenantDeploys | Should -BeNullOrEmpty
+        ($r.Platforms | Where-Object Name -eq 'Kaskelot').Releases | Should -Be 0
+    }
+    It 'marks the report incomplete when a platform failed' {
+        $r = New-ReleaseReport @common -Warnings @('FAILED x') -FailedPlatforms @('Kaskelot')
+        $r.Complete | Should -BeFalse
+        ($r.Platforms | Where-Object Name -eq 'Kaskelot').Complete | Should -BeFalse
+        ($r.Platforms | Where-Object Name -eq 'Troman').Complete | Should -BeTrue
+    }
+    It 'renders the KPI, table, detail, not-counted list and warnings' {
+        $md = Format-ReleaseReportMarkdown -Report (New-ReleaseReport @common -Warnings @() -FailedPlatforms @()) -TimeZone $tz
+        $md | Should -Match '## Releases to production — September 2026'
+        $md | Should -Match '\*\*Total releases \(Marathon KPI\): 2\*\*'
+        $md | Should -Match '\| Troman \| 1 \| – \|'
+        $md | Should -Match '\| Kaskelot \| 0 \| – \|'
+        $md | Should -Match '\| Mobilise \| 1 \| 3 \|'
+        $md | Should -Match '\| \*\*Total\*\* \| \*\*2\*\* \| \|'
+        $md | Should -Match '1\. 2026-09-30 — Valman Webb Release-22 \(partial\)'
+        $md | Should -Match '1\. 2026-09-04 — Classic Release-491 \(Uppsalakommun, Motala\)'
+        $md | Should -Match '- Mobilise Classic Release-492 — no customer production deploys \(only: UppsalaDev\)'
+        $md | Should -Match '### Warnings\s+- \(none\)'
+    }
+    It 'shows INCOMPLETE and n/a for a failed platform' {
+        $md = Format-ReleaseReportMarkdown -Report (New-ReleaseReport @common -Warnings @('FAILED x') -FailedPlatforms @('Kaskelot')) -TimeZone $tz
+        $md | Should -Match 'Total releases \(Marathon KPI\): 2 \(INCOMPLETE'
+        $md | Should -Match '\| Kaskelot \| n/a \(failed\) \| – \|'
+        $md | Should -Match '- FAILED x'
+    }
+}

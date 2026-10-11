@@ -273,3 +273,83 @@ function Group-PlatformReleases {
         if ($null -ne $current) { $current }
     }
 }
+
+function New-ReleaseReport {
+    param(
+        [Parameter(Mandatory)]$Window,
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Records,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Groups,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$NotCounted,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Warnings,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$FailedPlatforms
+    )
+    $platforms = @(foreach ($p in $Config.platforms) {
+        $pg = @($Groups | Where-Object Platform -eq $p.name)
+        $tenant = $null
+        if ($p.showTenantDeploys) {
+            $tenant = @($Records | Where-Object {
+                $_.Platform -eq $p.name -and $_.Time -ge $Window.Start -and $_.Time -lt $Window.End
+            }).Count
+        }
+        [pscustomobject]@{
+            Name          = $p.name
+            Releases      = $pg.Count
+            TenantDeploys = $tenant
+            Complete      = $FailedPlatforms -notcontains $p.name
+            Groups        = $pg
+            NotCounted    = @($NotCounted | Where-Object Platform -eq $p.name)
+        }
+    })
+    [pscustomobject]@{
+        Month     = $Window.Month
+        Label     = $Window.Label
+        Total     = [int](($platforms | Measure-Object -Property Releases -Sum).Sum)
+        Complete  = $FailedPlatforms.Count -eq 0
+        Platforms = $platforms
+        Warnings  = @($Warnings)
+    }
+}
+
+function Format-ReleaseReportMarkdown {
+    param([Parameter(Mandatory)]$Report, [Parameter(Mandatory)]$TimeZone)
+    $sb = [System.Text.StringBuilder]::new()
+    $null = $sb.AppendLine("## Releases to production — $($Report.Label)").AppendLine()
+    $total = if ($Report.Complete) { "$($Report.Total)" } else { "$($Report.Total) (INCOMPLETE — see warnings)" }
+    $null = $sb.AppendLine("**Total releases (Marathon KPI): $total**").AppendLine()
+    $null = $sb.AppendLine('| Platform | Releases | Tenant deploys |').AppendLine('|---|---|---|')
+    foreach ($p in $Report.Platforms) {
+        $rel = if ($p.Complete) { "$($p.Releases)" } else { 'n/a (failed)' }
+        $ten = if ($null -eq $p.TenantDeploys) { '–' } else { "$($p.TenantDeploys)" }
+        $null = $sb.AppendLine("| $($p.Name) | $rel | $ten |")
+    }
+    $null = $sb.AppendLine("| **Total** | **$($Report.Total)** | |")
+
+    foreach ($p in $Report.Platforms) {
+        if ($p.Groups.Count -eq 0) { continue }
+        $null = $sb.AppendLine().AppendLine("### $($p.Name)")
+        $i = 0
+        foreach ($g in $p.Groups) {
+            $i++
+            $parts = foreach ($r in $g.Releases) {
+                $s = "$($r.Label) $($r.ReleaseName)"
+                if ($r.Partial) { $s += ' (partial)' }
+                if ($null -ne $p.TenantDeploys) { $s += " ($(@($r.Stages) -join ', '))" }
+                $s
+            }
+            $null = $sb.AppendLine("$i. $(Format-LocalDate -Utc $g.Start -TimeZone $TimeZone) — $(@($parts) -join '; ')")
+        }
+    }
+
+    $nc = @($Report.Platforms | ForEach-Object { $_.NotCounted })
+    if ($nc.Count -gt 0) {
+        $null = $sb.AppendLine().AppendLine('### Not counted')
+        foreach ($n in $nc) { $null = $sb.AppendLine("- $($n.Platform) $($n.Label) $($n.ReleaseName) — $($n.Reason)") }
+    }
+
+    $null = $sb.AppendLine().AppendLine('### Warnings')
+    if (@($Report.Warnings).Count -eq 0) { $null = $sb.AppendLine('- (none)') }
+    foreach ($w in $Report.Warnings) { $null = $sb.AppendLine("- $w") }
+    $sb.ToString()
+}
+
