@@ -285,9 +285,11 @@ function New-ReleaseReport {
         [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$FailedPlatforms
     )
     $platforms = @(foreach ($p in $Config.platforms) {
-        $pg = @($Groups | Where-Object Platform -eq $p.name)
+        # A platform with a failed source is left out of the total and the detail entirely.
+        $failed = $FailedPlatforms -contains $p.name
+        $pg = @($Groups | Where-Object { -not $failed -and $_.Platform -eq $p.name })
         $tenant = $null
-        if ($p.showTenantDeploys) {
+        if ($p.showTenantDeploys -and -not $failed) {
             $tenant = @($Records | Where-Object {
                 $_.Platform -eq $p.name -and $_.Time -ge $Window.Start -and $_.Time -lt $Window.End
             }).Count
@@ -296,9 +298,9 @@ function New-ReleaseReport {
             Name          = $p.name
             Releases      = $pg.Count
             TenantDeploys = $tenant
-            Complete      = $FailedPlatforms -notcontains $p.name
+            Complete      = -not $failed
             Groups        = $pg
-            NotCounted    = @($NotCounted | Where-Object Platform -eq $p.name)
+            NotCounted    = @($NotCounted | Where-Object { -not $failed -and $_.Platform -eq $p.name })
         }
     })
     [pscustomobject]@{

@@ -443,4 +443,14 @@ Describe 'New-ReleaseReport and Format-ReleaseReportMarkdown' {
         $md | Should -Match '\| Kaskelot \| n/a \(failed\) \| – \|'
         $md | Should -Match '- FAILED x'
     }
+    It 'leaves a failed platform with data out of the total and the detail' {
+        $r = New-ReleaseReport @common -Warnings @('FAILED y') -FailedPlatforms @('Mobilise')
+        $r.Total | Should -Be 1
+        $m = $r.Platforms | Where-Object Name -eq 'Mobilise'
+        $m.Releases | Should -Be 0
+        $m.TenantDeploys | Should -BeNullOrEmpty
+        $md = Format-ReleaseReportMarkdown -Report $r -TimeZone $tz
+        $md | Should -Match '\| Mobilise \| n/a \(failed\) \| – \|'
+        $md | Should -Not -Match '### Mobilise'
+    }
 }
