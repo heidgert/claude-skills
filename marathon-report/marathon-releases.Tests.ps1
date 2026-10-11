@@ -454,3 +454,161 @@ Describe 'New-ReleaseReport and Format-ReleaseReportMarkdown' {
         $md | Should -Not -Match '### Mobilise'
     }
 }
+
+Describe 'Get-AzdoAuthHeader' {
+    It 'builds a Basic header from the named env var' {
+        $env:MARATHON_TEST_PAT = 'abc'
+        try {
+            (Get-AzdoAuthHeader -PatEnvVar 'MARATHON_TEST_PAT').Authorization |
+                Should -Be ('Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(':abc')))
+        } finally { Remove-Item Env:MARATHON_TEST_PAT }
+    }
+    It 'names the missing env var in the error' {
+        { Get-AzdoAuthHeader -PatEnvVar 'MARATHON_TEST_MISSING_PAT' } | Should -Throw '*MARATHON_TEST_MISSING_PAT*'
+    }
+}
+
+Describe 'Get-AzdoDeployments' {
+    BeforeAll {
+        function New-Response {
+            param([string]$Json, [string]$Token)
+            $h = @{}
+            if ($Token) { $h['x-ms-continuationtoken'] = @($Token) }
+            [pscustomobject]@{
+                RawContentStream = [IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($Json))
+                Headers          = $h
+            }
+        }
+        $call = @{
+            Headers    = @{ Authorization = 'Basic test' }
+            MinStarted = (Get-Utc '2026-06-02T22:00:00Z')
+            MaxStarted = (Get-Utc '2026-10-01T22:00:00Z')
+        }
+    }
+    It 'follows the continuation token and decodes UTF-8 stage names' {
+        Mock Invoke-WebRequest -ParameterFilter { $Uri.AbsoluteUri -notmatch 'continuationToken' } -MockWith {
+            New-Response '{"count":1,"value":[{"id":2,"releaseEnvironment":{"name":"Tranås"}}]}' '540'
+        }
+        Mock Invoke-WebRequest -ParameterFilter { $Uri.AbsoluteUri -match 'continuationToken=540' } -MockWith {
+            New-Response '{"count":1,"value":[{"id":1,"releaseEnvironment":{"name":"Bjørnafjorden"}}]}' $null
+        }
+        $d = @(Get-AzdoDeployments -Org 'mobilise' -Project 'NG-Mobilise' @call)
+        $d.Count | Should -Be 2
+        $d[0].releaseEnvironment.name | Should -Be 'Tranås'
+        $d[1].releaseEnvironment.name | Should -Be 'Bjørnafjorden'
+        Should -Invoke Invoke-WebRequest -Times 2 -Exactly
+    }
+    It 'escapes the project name and sends the time window in UTC' {
+        Mock Invoke-WebRequest -MockWith { New-Response '{"count":0,"value":[]}' $null }
+        $null = Get-AzdoDeployments -Org 'preciofishbone' -Project 'Kaskelot online' @call
+        Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter {
+            $Uri.AbsoluteUri -like 'https://vsrm.dev.azure.com/preciofishbone/Kaskelot%20online/_apis/release/deployments?*' -and
+            $Uri.AbsoluteUri -match 'minStartedTime=2026-06-02T22:00:00Z' -and
+            $Uri.AbsoluteUri -match 'maxStartedTime=2026-10-01T22:00:00Z'
+        }
+    }
+}
+
+Describe 'Invoke-Main' {
+    BeforeAll {
+        # Canned September 2026 data mirroring the real tenants (subset of stages).
+        $fixture = @{
+            'troman-ab/Troman' = @(
+                New-Dep 'Troman/Valman Webb' 310 'Dev' '2026-09-10T08:00:00Z' -RelName 'Release-21'
+                New-Dep 'Troman/Valman Webb' 328 'Kundtest' '2026-09-29T10:00:00Z' -Status 'failed' -RelName 'Release-22'
+                New-Dep 'Troman/Valman Webb' 328 'Kundtest' '2026-09-29T11:00:00Z' -RelName 'Release-22'
+                New-Dep 'Troman/Valman Webb' 328 'Prod' '2026-09-30T17:11:42Z' -Status 'partiallySucceeded' -RelName 'Release-22'
+                New-Dep 'troman-politiker-back' 40 'Prod' '2026-09-30T17:05:00Z' -RelName 'Release-8'
+                New-Dep 'troman-politiker-front' 41 'Prod' '2026-09-30T17:08:00Z' -RelName 'Release-12'
+            )
+            'preciofishbone/Kaskelot online' = @(
+                New-Dep 'Internal application' 101 'Stage' '2026-09-04T12:00:00Z' -RelName '20260903_1'
+                New-Dep 'Internal application' 101 'Production' '2026-09-04T13:00:00Z' -RelName '20260903_1'
+                New-Dep 'External application' 201 'Production' '2026-09-04T13:10:00Z' -RelName '20260903_1'
+                New-Dep 'Internal application' 103 'Test' '2026-09-09T09:00:00Z' -RelName '20260909_1'
+                New-Dep 'Internal application' 105 'Production' '2026-09-16T14:00:00Z' -RelName '20260916_1'
+            )
+            'mobilise/Mobilise' = @(
+                New-Dep 'Mobilise' 490 'UppsalaDev' '2026-09-03T09:00:00Z'
+                New-Dep 'Mobilise' 490 'val' '2026-09-03T09:30:00Z'
+                New-Dep 'Mobilise' 490 'Uppsalakommun' '2026-09-03T10:34:10Z'
+                New-Dep 'Mobilise' 491 'Uppsalakommun' '2026-09-04T19:45:09Z'
+                New-Dep 'Mobilise' 491 'Motala' '2026-09-04T20:00:00Z'
+                New-Dep 'Mobilise' 491 'Troman' '2026-09-05T08:00:00Z'
+                New-Dep 'Mobilise' 492 'UppsalaDev' '2026-09-08T10:00:00Z'
+                New-Dep 'Mobilise' 494 'Uppsalakommun' '2026-09-10T10:15:21Z'
+                New-Dep 'Mobilise' 496 'Cup' '2026-09-17T08:40:00Z'
+                New-Dep 'Mobilise' 496 'Ringerike' '2026-09-21T09:00:00Z' -Status 'failed'
+                New-Dep 'Mobilise' 496 'Ringerike' '2026-09-21T09:30:00Z'
+                New-Dep 'Mobilise' 498 'Kirkens bymisjon' '2026-09-22T14:06:00Z'
+                New-Dep 'Mobilise' 498 'Bjørnafjorden' '2026-09-24T10:00:00Z'
+                New-Dep 'Fredrik testar' 7 'val' '2026-09-12T10:00:00Z'
+            )
+            'mobilise/NG-Mobilise' = @(
+                New-Dep 'core web-Api Release' 430 'Mullsjo' '2026-09-02T18:05:00Z'
+                New-Dep 'core web-Api Release' 431 'Uppsala kommun' '2026-09-03T10:22:00Z'
+                New-Dep 'core web-Api Release' 432 'Troman' '2026-09-07T18:00:00Z'
+                New-Dep 'core web-Api Release' 432 'stockholmpride' '2026-09-07T18:51:00Z'
+                New-Dep 'core web-Api Release' 432 'valg' '2026-09-08T08:00:00Z' -Status 'failed'
+                New-Dep 'core web-Api Release' 433 'valg' '2026-09-08T09:00:00Z'
+                New-Dep 'core web-Api Release' 434 'Demo live' '2026-09-17T12:00:00Z'
+                New-Dep 'core web-Api Release' 434 'BLAKORS' '2026-09-18T10:53:00Z'
+                New-Dep 'core web-Api Release' 434 'Ringerike' '2026-09-21T09:40:00Z'
+                New-Dep 'core web-Api Release' 435 'Marks' '2026-09-29T12:05:00Z'
+                New-Dep 'core web-Api Release' 435 'Mölndal' '2026-09-29T12:30:00Z'
+                New-Dep 'core web-Api Release' 435 'dntdev' '2026-09-30T08:00:00Z'
+            )
+        }
+        $after = Get-Utc '2026-10-09T08:00:00Z'
+    }
+    BeforeEach {
+        Mock Get-AzdoAuthHeader { @{ Authorization = 'Basic test' } }
+        Mock Get-AzdoDeployments { $fixture["$Org/$Project"] }
+    }
+    It 'counts September 2026 as Troman 1 + Kaskelot 2 + Mobilise 8 = 11' {
+        $md = Invoke-Main -Month '2026-09' -Config $ConfigPath -Now $after
+        $md | Should -Match '\*\*Total releases \(Marathon KPI\): 11\*\*'
+        $md | Should -Match '\| Troman \| 1 \| – \|'
+        $md | Should -Match '\| Kaskelot \| 2 \| – \|'
+        $md | Should -Match '\| Mobilise \| 8 \| 15 \|'
+    }
+    It 'groups NG 430, NG 431 and Classic 490 as one Mobilise release' {
+        $md = Invoke-Main -Month '2026-09' -Config $ConfigPath -Now $after
+        $md | Should -Match '1\. 2026-09-02 — NG Release-430 \(Mullsjo\); NG Release-431 \(Uppsala kommun\); Classic Release-490 \(Uppsalakommun\)'
+    }
+    It 'lists releases that only reached internal stages as not counted, with no warnings' {
+        $md = Invoke-Main -Month '2026-09' -Config $ConfigPath -Now $after
+        $md | Should -Match 'Mobilise Classic Release-492 — no customer production deploys \(only: UppsalaDev\)'
+        $md | Should -Match 'Mobilise NG Release-433 — no customer production deploys \(only: valg\)'
+        $md | Should -Match '### Warnings\s+- \(none\)'
+    }
+    It 'asks each source for 90 days of lookback and 24 hours of look-ahead' {
+        $null = Invoke-Main -Month '2026-09' -Config $ConfigPath -Now $after
+        Should -Invoke Get-AzdoDeployments -Times 4 -Exactly -ParameterFilter {
+            $MinStarted -eq (Get-Utc '2026-06-02T22:00:00Z') -and $MaxStarted -eq (Get-Utc '2026-10-01T22:00:00Z')
+        }
+    }
+    It 'warns that the numbers are not final when run within 24 hours of month end' {
+        $md = Invoke-Main -Month '2026-09' -Config $ConfigPath -Now (Get-Utc '2026-10-01T10:00:00Z')
+        $md | Should -Match 'Not final yet'
+    }
+    It 'reports a failed org as incomplete and still counts the others' {
+        Mock Get-AzdoDeployments -ParameterFilter { $Org -eq 'preciofishbone' } -MockWith {
+            throw 'Response status code does not indicate success: 401 (Unauthorized).'
+        }
+        $md = Invoke-Main -Month '2026-09' -Config $ConfigPath -Now $after
+        $md | Should -Match 'Total releases \(Marathon KPI\): 9 \(INCOMPLETE'
+        $md | Should -Match '\| Kaskelot \| n/a \(failed\) \| – \|'
+        $md | Should -Match 'FAILED to read preciofishbone/Kaskelot online for Kaskelot: .*401'
+    }
+    It 'writes the report as JSON when -Json is given' {
+        $path = Join-Path ([IO.Path]::GetTempPath()) ('marathon_' + [guid]::NewGuid().ToString('N') + '.json')
+        try {
+            $null = Invoke-Main -Month '2026-09' -Config $ConfigPath -Now $after -Json $path
+            $j = Get-Content -LiteralPath $path -Raw -Encoding utf8 | ConvertFrom-Json
+            $j.Total | Should -Be 11
+            $j.Month | Should -Be '2026-09'
+            ($j.Platforms | Where-Object Name -eq 'Mobilise').TenantDeploys | Should -Be 15
+        } finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
+    }
+}

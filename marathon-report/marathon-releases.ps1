@@ -355,3 +355,101 @@ function Format-ReleaseReportMarkdown {
     $sb.ToString()
 }
 
+function Get-AzdoAuthHeader {
+    param([Parameter(Mandatory)][string]$PatEnvVar)
+    $pat = [Environment]::GetEnvironmentVariable($PatEnvVar)
+    if (-not $pat) { throw "Environment variable '$PatEnvVar' is not set (it must hold a PAT with Release (Read) scope)." }
+    @{ Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat")) }
+}
+
+function Get-AzdoDeployments {
+    param(
+        [Parameter(Mandatory)][string]$Org,
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][hashtable]$Headers,
+        [Parameter(Mandatory)][datetime]$MinStarted,
+        [Parameter(Mandatory)][datetime]$MaxStarted
+    )
+    $fmt = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $min = (ConvertTo-UtcDateTime $MinStarted).ToString($fmt, $inv)
+    $max = (ConvertTo-UtcDateTime $MaxStarted).ToString($fmt, $inv)
+    $base = "https://vsrm.dev.azure.com/$Org/$([uri]::EscapeDataString($Project))/_apis/release/deployments"
+    $all = [System.Collections.Generic.List[object]]::new()
+    $token = $null
+    do {
+        $uri = "${base}?minStartedTime=$min&maxStartedTime=$max&`$top=100&api-version=7.1"
+        if ($token) { $uri += "&continuationToken=$([uri]::EscapeDataString($token))" }
+        $resp = Invoke-WebRequest -Uri $uri -Headers $Headers -UseBasicParsing
+        # Decode the raw bytes as UTF-8 ourselves so stage names like 'Tranås' survive
+        # even if the response lacks a charset.
+        $body = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()) | ConvertFrom-Json
+        foreach ($d in @($body.value)) { $all.Add($d) }
+        $token = $null
+        if ($resp.Headers.ContainsKey('x-ms-continuationtoken')) { $token = @($resp.Headers['x-ms-continuationtoken'])[0] }
+    } while ($token)
+    $all.ToArray()
+}
+
+function Invoke-Main {
+    param(
+        [string]$Month,
+        [string]$Json,
+        [string]$Config,
+        [datetime]$Now = [datetime]::UtcNow
+    )
+    # Stage names contain å/ä/ö/ø; some hosts (no console attached) refuse this, which is harmless.
+    try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+    if (-not $Config) { $Config = Join-Path $PSScriptRoot 'marathon-releases.config.json' }
+    $cfg = Read-ReleaseConfig -Path $Config
+    $window = Get-MonthWindow -Month $Month -TimeZone $cfg.timeZone -Now $Now
+    $min = $window.Start.AddDays(-[double]$cfg.lookbackDays)
+    $max = $window.End.AddHours([double]$cfg.supersedeWindowHours)
+
+    $records = [System.Collections.Generic.List[object]]::new()
+    $excluded = [System.Collections.Generic.List[object]]::new()
+    $warnings = [System.Collections.Generic.List[string]]::new()
+    $failed = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($p in $cfg.platforms) {
+        foreach ($s in $p.sources) {
+            try {
+                $headers = Get-AzdoAuthHeader -PatEnvVar $s.patEnvVar
+                $deps = @(Get-AzdoDeployments -Org $s.org -Project $s.project -Headers $headers -MinStarted $min -MaxStarted $max)
+            } catch {
+                $warnings.Add("FAILED to read $($s.org)/$($s.project) for $($p.name): $($_.Exception.Message) $($p.name) is left out of the total.")
+                if ($failed -notcontains $p.name) { $failed.Add($p.name) }
+                continue
+            }
+            $sel = Select-ProductionDeploys -Deployments $deps -Source $s -Platform $p.name `
+                -CountedStatuses @($cfg.countedStatuses) -WindowStart $window.Start -WindowEnd $window.End
+            foreach ($r in $sel.Records) { $records.Add($r) }
+            foreach ($r in $sel.Excluded) { $excluded.Add($r) }
+            foreach ($w in $sel.Warnings) { $warnings.Add($w) }
+        }
+    }
+
+    # A platform with a failed source is dropped entirely so a partial count is never reported as real.
+    $okRecords = @($records | Where-Object { $failed -notcontains $_.Platform })
+    $okExcluded = @($excluded | Where-Object { $failed -notcontains $_.Platform })
+
+    $superseded = Find-SupersededReleases -Records $okRecords -WindowHours ([double]$cfg.supersedeWindowHours)
+    $res = Get-CountedReleases -Records $okRecords -Excluded $okExcluded -Superseded $superseded `
+        -WindowStart $window.Start -WindowEnd $window.End -TimeZone $window.TimeZone
+    $groups = @(Group-PlatformReleases -Releases $res.Counted -WindowHours ([double]$cfg.groupWindowHours))
+
+    if ((ConvertTo-UtcDateTime $Now) -lt $max) {
+        $finalAt = [TimeZoneInfo]::ConvertTimeFromUtc($max, $window.TimeZone).ToString('yyyy-MM-dd HH:mm')
+        $warnings.Insert(0, "Not final yet: releases replaced within $($cfg.supersedeWindowHours) h of month end can still change the count. Run again after $finalAt (Stockholm time).")
+    }
+
+    $report = New-ReleaseReport -Window $window -Config $cfg -Records $okRecords -Groups $groups `
+        -NotCounted $res.NotCounted -Warnings @($warnings) -FailedPlatforms @($failed)
+    if ($Json) { $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Json -Encoding utf8 }
+    Format-ReleaseReportMarkdown -Report $report -TimeZone $window.TimeZone
+}
+
+# Guard: when dot-sourced for tests, InvocationName is '.', so Main does not run.
+if ($MyInvocation.InvocationName -ne '.') {
+    Invoke-Main @PSBoundParameters
+}
