@@ -149,3 +149,127 @@ function Select-ProductionDeploys {
         Warnings = @($warnings)
     }
 }
+
+function Find-SupersededReleases {
+    # A release is superseded when, on every stage it reached, a newer release of the same
+    # definition was deployed within the window after it. Returns "Definition|ReleaseId" -> superseding record.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Records,
+        [Parameter(Mandatory)][double]$WindowHours
+    )
+    $window = [timespan]::FromHours($WindowHours)
+    $result = @{}
+    foreach ($defGroup in ($Records | Group-Object Definition)) {
+        foreach ($relGroup in ($defGroup.Group | Group-Object ReleaseId)) {
+            $by = $null
+            $all = $true
+            foreach ($r in $relGroup.Group) {
+                $newer = $defGroup.Group | Where-Object {
+                    $_.Stage -eq $r.Stage -and $_.ReleaseId -gt $r.ReleaseId -and
+                    $_.Time -gt $r.Time -and ($_.Time - $r.Time) -le $window
+                } | Sort-Object Time | Select-Object -First 1
+                if ($null -eq $newer) { $all = $false; break }
+                if ($null -eq $by -or $newer.ReleaseId -gt $by.ReleaseId) { $by = $newer }
+            }
+            if ($all) { $result["$($relGroup.Group[0].Definition)|$($relGroup.Group[0].ReleaseId)"] = $by }
+        }
+    }
+    $result
+}
+
+function Format-LocalDate {
+    param([Parameter(Mandatory)][datetime]$Utc, [Parameter(Mandatory)]$TimeZone)
+    [TimeZoneInfo]::ConvertTimeFromUtc((ConvertTo-UtcDateTime $Utc), $TimeZone).ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-CountedReleases {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Records,
+        [object[]]$Excluded = @(),
+        [hashtable]$Superseded = @{},
+        [Parameter(Mandatory)][datetime]$WindowStart,
+        [Parameter(Mandatory)][datetime]$WindowEnd,
+        [Parameter(Mandatory)]$TimeZone
+    )
+    $counted = [System.Collections.Generic.List[object]]::new()
+    $notCounted = [System.Collections.Generic.List[object]]::new()
+    $prodKeys = @{}
+
+    foreach ($g in ($Records | Group-Object Definition, ReleaseId)) {
+        $recs = @($g.Group | Sort-Object Time)
+        $first = $recs[0]
+        $key = "$($first.Definition)|$($first.ReleaseId)"
+        $prodKeys[$key] = $true
+        $firstInMonth = $first.Time -ge $WindowStart -and $first.Time -lt $WindowEnd
+
+        if ($Superseded.ContainsKey($key)) {
+            if ($firstInMonth) {
+                $by = $Superseded[$key]
+                $notCounted.Add([pscustomobject]@{
+                    Platform = $first.Platform; Label = $first.Label; ReleaseName = $first.ReleaseName
+                    Reason = "folded into $($by.Label) $($by.ReleaseName) (replaced on every stage within the supersede window)"
+                })
+            }
+            continue
+        }
+        if ($first.Time -lt $WindowStart) {
+            $deployedInMonth = @($recs | Where-Object { $_.Time -ge $WindowStart -and $_.Time -lt $WindowEnd }).Count -gt 0
+            if ($deployedInMonth) {
+                $notCounted.Add([pscustomobject]@{
+                    Platform = $first.Platform; Label = $first.Label; ReleaseName = $first.ReleaseName
+                    Reason = "first production deploy $(Format-LocalDate -Utc $first.Time -TimeZone $TimeZone) was in an earlier month"
+                })
+            }
+            continue
+        }
+        if (-not $firstInMonth) { continue }   # first deploy after the month (look-ahead data)
+
+        $counted.Add([pscustomobject]@{
+            Platform = $first.Platform; Definition = $first.Definition; Label = $first.Label
+            ReleaseId = $first.ReleaseId; ReleaseName = $first.ReleaseName
+            FirstDeploy = $first.Time
+            Stages = @($recs | ForEach-Object Stage)
+            Partial = @($recs | Where-Object Status -eq 'partiallySucceeded').Count -gt 0
+        })
+    }
+
+    $excludedInMonth = @($Excluded | Where-Object { $_.Time -ge $WindowStart -and $_.Time -lt $WindowEnd })
+    foreach ($g in ($excludedInMonth | Group-Object Definition, ReleaseId)) {
+        $f = $g.Group[0]
+        if ($prodKeys.ContainsKey("$($f.Definition)|$($f.ReleaseId)")) { continue }
+        $stages = @($g.Group | ForEach-Object Stage | Sort-Object -Unique) -join ', '
+        $notCounted.Add([pscustomobject]@{
+            Platform = $f.Platform; Label = $f.Label; ReleaseName = $f.ReleaseName
+            Reason = "no customer production deploys (only: $stages)"
+        })
+    }
+
+    [pscustomobject]@{
+        Counted    = @($counted | Sort-Object FirstDeploy)
+        NotCounted = @($notCounted)
+    }
+}
+
+function Group-PlatformReleases {
+    # Releases of one platform whose first deploy is within the window of the group's first
+    # release count as one release. Groups never span platforms.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Releases,
+        [Parameter(Mandatory)][double]$WindowHours
+    )
+    $window = [timespan]::FromHours($WindowHours)
+    foreach ($p in ($Releases | Group-Object Platform)) {
+        $current = $null
+        foreach ($r in ($p.Group | Sort-Object FirstDeploy, Definition, ReleaseId)) {
+            if ($null -eq $current -or ($r.FirstDeploy - $current.Start) -gt $window) {
+                if ($null -ne $current) { $current }
+                $current = [pscustomobject]@{
+                    Platform = $p.Name; Start = $r.FirstDeploy
+                    Releases = [System.Collections.Generic.List[object]]::new()
+                }
+            }
+            $current.Releases.Add($r)
+        }
+        if ($null -ne $current) { $current }
+    }
+}

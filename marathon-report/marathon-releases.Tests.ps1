@@ -219,3 +219,170 @@ Describe 'Select-ProductionDeploys' {
         $r.Warnings.Count | Should -Be 0
     }
 }
+
+
+Describe 'Find-SupersededReleases' {
+    It 'does not fold 490 into 491 when they are 33 hours apart on Uppsalakommun' {
+        $recs = @(
+            New-Rec 'Mobilise' 490 'Uppsalakommun' '2026-09-03T10:34:10Z'
+            New-Rec 'Mobilise' 491 'Uppsalakommun' '2026-09-04T19:45:09Z'
+        )
+        (Find-SupersededReleases -Records $recs -WindowHours 24).Count | Should -Be 0
+    }
+    It 'folds a release replaced on every stage within 24 hours' {
+        $recs = @(
+            New-Rec 'Mobilise' 492 'Cup' '2026-09-08T10:00:00Z'
+            New-Rec 'Mobilise' 492 'Habo' '2026-09-08T11:00:00Z'
+            New-Rec 'Mobilise' 493 'Cup' '2026-09-08T15:00:00Z'
+            New-Rec 'Mobilise' 493 'Habo' '2026-09-09T09:00:00Z'
+        )
+        $s = Find-SupersededReleases -Records $recs -WindowHours 24
+        (@($s.Keys) -join ',') | Should -Be 'Mobilise|492'
+        $s['Mobilise|492'].ReleaseName | Should -Be 'Release-493'
+    }
+    It 'does not fold a release replaced on only some of its stages' {
+        $recs = @(
+            New-Rec 'Mobilise' 492 'Cup' '2026-09-08T10:00:00Z'
+            New-Rec 'Mobilise' 492 'Habo' '2026-09-08T11:00:00Z'
+            New-Rec 'Mobilise' 493 'Cup' '2026-09-08T15:00:00Z'
+        )
+        (Find-SupersededReleases -Records $recs -WindowHours 24).Count | Should -Be 0
+    }
+    It 'treats exactly 24 hours as within the window' {
+        $recs = @(
+            New-Rec 'Mobilise' 492 'Cup' '2026-09-08T10:00:00Z'
+            New-Rec 'Mobilise' 493 'Cup' '2026-09-09T10:00:00Z'
+        )
+        (Find-SupersededReleases -Records $recs -WindowHours 24).ContainsKey('Mobilise|492') | Should -BeTrue
+    }
+    It 'only compares releases of the same definition' {
+        $recs = @(
+            New-Rec 'Mobilise' 496 'Ringerike' '2026-09-21T09:30:00Z'
+            New-Rec 'core web-Api Release' 534 'Ringerike' '2026-09-21T09:40:00Z'
+        )
+        (Find-SupersededReleases -Records $recs -WindowHours 24).Count | Should -Be 0
+    }
+    It 'ignores an older release deployed after a newer one' {
+        $recs = @(
+            New-Rec 'Mobilise' 493 'Cup' '2026-09-08T10:00:00Z'
+            New-Rec 'Mobilise' 492 'Cup' '2026-09-08T12:00:00Z'
+        )
+        (Find-SupersededReleases -Records $recs -WindowHours 24).Count | Should -Be 0
+    }
+}
+
+Describe 'Get-CountedReleases' {
+    BeforeAll {
+        $w = @{
+            WindowStart = (Get-Utc '2026-08-31T22:00:00Z')
+            WindowEnd   = (Get-Utc '2026-09-30T22:00:00Z')
+            TimeZone    = [TimeZoneInfo]::FindSystemTimeZoneById('Europe/Stockholm')
+        }
+    }
+    It 'counts a release in the month of its first production deploy, in Stockholm time' {
+        # 2026-08-31T22:30Z is 00:30 on 1 September in Stockholm.
+        $r = Get-CountedReleases -Records @(New-Rec 'Mobilise' 489 'Cup' '2026-08-31T22:30:00Z') @w
+        $r.Counted.Count | Should -Be 1
+        $r.Counted[0].FirstDeploy | Should -Be (Get-Utc '2026-08-31T22:30:00Z')
+    }
+    It 'does not count a release first deployed in an earlier month, and says why' {
+        $recs = @(
+            New-Rec 'Mobilise' 488 'Cup' '2026-08-28T10:00:00Z'
+            New-Rec 'Mobilise' 488 'Habo' '2026-09-02T10:00:00Z'
+        )
+        $r = Get-CountedReleases -Records $recs @w
+        $r.Counted.Count | Should -Be 0
+        $r.NotCounted[0].Reason | Should -BeLike '*2026-08-28*earlier month*'
+    }
+    It 'ignores releases first deployed after the month (look-ahead data)' {
+        $r = Get-CountedReleases -Records @(New-Rec 'Mobilise' 500 'Cup' '2026-10-01T05:00:00Z') @w
+        $r.Counted.Count | Should -Be 0
+        $r.NotCounted.Count | Should -Be 0
+    }
+    It 'leaves out superseded releases and names the release they were folded into' {
+        $recs = @(
+            New-Rec 'Mobilise' 492 'Cup' '2026-09-08T10:00:00Z'
+            New-Rec 'Mobilise' 493 'Cup' '2026-09-08T15:00:00Z'
+        )
+        $sup = Find-SupersededReleases -Records $recs -WindowHours 24
+        $r = Get-CountedReleases -Records $recs -Superseded $sup @w
+        (@($r.Counted.ReleaseName) -join ',') | Should -Be 'Release-493'
+        $r.NotCounted[0].Reason | Should -BeLike '*folded into Mobilise Release-493*'
+    }
+    It 'flags partial success and lists the stages in deploy order' {
+        $recs = @(
+            New-Rec 'Mobilise' 491 'Motala' '2026-09-04T20:00:00Z' -Status 'partiallySucceeded'
+            New-Rec 'Mobilise' 491 'Uppsalakommun' '2026-09-04T19:45:09Z'
+        )
+        $r = Get-CountedReleases -Records $recs @w
+        $r.Counted[0].Partial | Should -BeTrue
+        ($r.Counted[0].Stages -join ',') | Should -Be 'Uppsalakommun,Motala'
+    }
+    It 'reports releases that only reached excluded stages' {
+        $exc = @(New-Rec 'Mobilise' 492 'UppsalaDev' '2026-09-08T10:00:00Z' -Label 'Classic')
+        $r = Get-CountedReleases -Records @() -Excluded $exc @w
+        $r.NotCounted.Count | Should -Be 1
+        $r.NotCounted[0].Label | Should -Be 'Classic'
+        $r.NotCounted[0].Reason | Should -Be 'no customer production deploys (only: UppsalaDev)'
+    }
+    It 'does not report an excluded deploy when the release also reached a customer' {
+        $recs = @(New-Rec 'Mobilise' 490 'Uppsalakommun' '2026-09-03T10:34:10Z')
+        $exc = @(New-Rec 'Mobilise' 490 'UppsalaDev' '2026-09-03T09:00:00Z')
+        $r = Get-CountedReleases -Records $recs -Excluded $exc @w
+        $r.NotCounted.Count | Should -Be 0
+    }
+}
+
+Describe 'Group-PlatformReleases' {
+    BeforeAll {
+        function New-Release {
+            param([string]$Platform, [string]$Def, [int]$Rel, [string]$First)
+            [pscustomobject]@{
+                Platform = $Platform; Definition = $Def; Label = $Def; ReleaseId = $Rel
+                ReleaseName = "Release-$Rel"; FirstDeploy = (Get-Utc $First); Stages = @('x'); Partial = $false
+            }
+        }
+    }
+    It 'merges Troman components released together into one' {
+        $rel = @(
+            New-Release 'Troman' 'troman-politiker-back' 8 '2026-09-30T17:05:00Z'
+            New-Release 'Troman' 'troman-politiker-front' 12 '2026-09-30T17:08:00Z'
+            New-Release 'Troman' 'Troman/Valman Webb' 22 '2026-09-30T17:11:42Z'
+        )
+        $g = @(Group-PlatformReleases -Releases $rel -WindowHours 24)
+        $g.Count | Should -Be 1
+        $g[0].Releases.Count | Should -Be 3
+        $g[0].Start | Should -Be (Get-Utc '2026-09-30T17:05:00Z')
+    }
+    It 'keeps Kaskelot 4 Sep and 16 Sep as two releases' {
+        $rel = @(
+            New-Release 'Kaskelot' 'Internal application' 101 '2026-09-04T13:00:00Z'
+            New-Release 'Kaskelot' 'External application' 201 '2026-09-04T13:10:00Z'
+            New-Release 'Kaskelot' 'Internal application' 105 '2026-09-16T14:00:00Z'
+        )
+        $g = @(Group-PlatformReleases -Releases $rel -WindowHours 24)
+        $g.Count | Should -Be 2
+        $g[0].Releases.Count | Should -Be 2
+    }
+    It 'anchors the window at the start of the group, not at the previous release' {
+        $rel = @(
+            New-Release 'Mobilise' 'Mobilise' 1 '2026-09-01T00:00:00Z'
+            New-Release 'Mobilise' 'Mobilise' 2 '2026-09-01T20:00:00Z'
+            New-Release 'Mobilise' 'Mobilise' 3 '2026-09-02T06:00:00Z'
+        )
+        $g = @(Group-PlatformReleases -Releases $rel -WindowHours 24)
+        $g.Count | Should -Be 2
+        $g[0].Releases.Count | Should -Be 2
+        $g[1].Releases.Count | Should -Be 1
+    }
+    It 'never groups across platforms' {
+        $rel = @(
+            New-Release 'Troman' 'troman-publik' 1 '2026-09-10T10:00:00Z'
+            New-Release 'Kaskelot' 'Internal application' 2 '2026-09-10T10:05:00Z'
+        )
+        @(Group-PlatformReleases -Releases $rel -WindowHours 24).Count | Should -Be 2
+    }
+    It 'returns nothing for no releases' {
+        @(Group-PlatformReleases -Releases @() -WindowHours 24).Count | Should -Be 0
+    }
+}
